@@ -1,54 +1,80 @@
 {
   "schema_version": 1,
-  "scope": "Nexora Audit Edition 0.1.0",
+  "scope": "Nexora Audit Edition 0.1.1",
   "claims": [
     {
       "id": "manifest-bound-integrity",
-      "statement": "The verifier returns the exact regular-file bytes whose declared identity, producer version, byte length, and SHA-256 digest it checked, and fails closed on the tested malformed, mismatch, traversal, and symlink cases.",
+      "statement": "The verifier returns the exact regular-file bytes whose declared identity, producer version, byte length, and SHA-256 digest it checked; both manifest and payload reads are bounded, including growth beyond the observed file size.",
       "evidence": [
         "tests/test_manifest.py::ManifestIntegrityTests.test_returns_the_exact_bytes_that_were_hashed",
         "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_digest_size_identity_and_version_mismatches",
         "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_path_traversal_before_reading",
-        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_symlink_payload"
+        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_symlink_payload",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_declared_or_observed_payload_above_the_memory_bound",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_accepts_exact_payload_bound_and_rejects_growth_after_stat",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_manifest_above_its_fixed_memory_bound",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_read_failures_are_typed_as_manifest_integrity_errors"
       ],
-      "limitations": "This is a local-filesystem verifier, not a signature system or a defense against a privileged process mutating the filesystem."
+      "limitations": "The payload is returned in memory and therefore has a configurable finite ceiling. This is a local-filesystem verifier, not a signature system or a defense against a privileged process mutating the filesystem."
     },
     {
       "id": "atomic-publication",
-      "statement": "A publication is written and validated in a private staging directory before one final directory rename makes it discoverable; tested collisions preserve the incumbent and concurrent same-ID publishers have one winner.",
+      "statement": "Under supported local-filesystem semantics, publication root links, staged regular-file bytes, and directory entries are synchronized; the staged path set, entry types, permission modes, hardlink status, and bytes are sealed across validation and re-synchronized before one final rename makes the tree discoverable. Every final path present at the absent-name preflight is preserved, and tested cooperative same-ID publishers have one winner.",
       "evidence": [
         "tests/test_publication.py::AtomicPublicationTests.test_validates_before_the_final_name_becomes_discoverable",
+        "tests/test_publication.py::AtomicPublicationTests.test_validator_snapshot_binds_paths_types_modes_and_hardlinks",
+        "tests/test_publication.py::AtomicPublicationTests.test_validator_cannot_modify_the_tree_that_will_be_published",
+        "tests/test_publication.py::AtomicPublicationTests.test_validator_same_byte_rewrite_is_resynchronized_before_publish",
+        "tests/test_publication.py::AtomicPublicationTests.test_new_publication_root_is_durably_linked_from_its_parent",
+        "tests/test_publication.py::AtomicPublicationTests.test_root_creation_retry_resynchronizes_prior_ancestor_links",
         "tests/test_publication.py::AtomicPublicationTests.test_collision_never_replaces_the_incumbent",
         "tests/test_publication.py::AtomicPublicationTests.test_concurrent_same_id_publish_has_exactly_one_winner",
-        "tests/test_publication.py::AtomicPublicationTests.test_fsyncs_both_rename_parents_after_publication"
+        "tests/test_publication.py::AtomicPublicationTests.test_fsyncs_both_rename_parents_after_publication",
+        "tests/test_publication.py::AtomicPublicationTests.test_interruption_before_visibility_does_not_leave_a_final_name_tombstone",
+        "tests/test_publication.py::AtomicPublicationTests.test_existing_empty_final_directory_is_never_replaced",
+        "tests/test_publication.py::AtomicPublicationTests.test_existing_symlink_is_never_replaced",
+        "tests/test_publication.py::AtomicPublicationTests.test_visibility_followed_by_sync_failure_reports_an_indeterminate_outcome"
       ],
-      "limitations": "The claim assumes a local POSIX filesystem and same-filesystem rename semantics; a durability error can be reported after the final name has become visible."
+      "limitations": "The claim assumes a cooperative process, a case-sensitive local POSIX filesystem, and same-filesystem rename semantics. On filesystems that reject directory fsync, power-loss durability is not claimed. The seal excludes timestamps, ownership, ACLs, and extended attributes, and it cannot constrain a retained or concurrent writer. A same-user actor can race path checks, and a durability error can be reported after the final name becomes visible."
     },
     {
       "id": "journaled-transition",
-      "statement": "A bounded three-target transition validates fresh entry state, records durable phases, serializes every scope under one owned root with a process lock, and recovers conservatively across every injected rename interruption in the test matrix.",
+      "statement": "A bounded runtime or build transition re-synchronizes the complete ownership-root ancestry, validates topology and fresh entry state, synchronizes closed incumbent and staged contents before recording intent, revalidates their identities, records ordered phases with parent synchronization, and recovers conservatively across the tested interruption matrices.",
       "evidence": [
         "tests/test_transition.py::RuntimeTransitionTests.test_every_interrupted_rename_recovers_the_old_generation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_every_marker_publication_interruption_reaches_a_coherent_terminal_state",
         "tests/test_transition.py::RuntimeTransitionTests.test_interrupted_recovery_is_idempotently_resumable",
         "tests/test_transition.py::RuntimeTransitionTests.test_postcommit_interruption_keeps_the_verified_new_generation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_every_interrupted_build_rename_recovers_the_old_generation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_build_postchecks_fail_closed_for_missing_malformed_or_mismatched_metadata",
         "tests/test_transition.py::RuntimeTransitionTests.test_transition_lock_excludes_another_process",
         "tests/test_transition.py::RuntimeTransitionTests.test_root_lock_excludes_a_different_scope_in_another_process",
+        "tests/test_transition.py::RuntimeTransitionTests.test_new_transition_root_is_durably_linked_from_its_parent",
+        "tests/test_transition.py::RuntimeTransitionTests.test_root_creation_retry_resynchronizes_prior_ancestor_links",
+        "tests/test_transition.py::RuntimeTransitionTests.test_entry_synchronizes_live_and_stage_contents_before_prepared_marker",
+        "tests/test_transition.py::RuntimeTransitionTests.test_input_content_sync_failure_leaves_no_marker_or_mutation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_entry_revalidates_identity_after_content_synchronization",
+        "tests/test_transition.py::RuntimeTransitionTests.test_completed_phases_follow_nested_target_parent_synchronization",
         "tests/test_transition.py::RuntimeTransitionTests.test_run_rejects_a_forged_record_outside_the_marker_root",
         "tests/test_transition.py::RuntimeTransitionTests.test_run_rejects_stale_live_or_staged_identity_before_mutation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_plan_rejects_transition_control_paths_and_namespaces",
+        "tests/test_transition.py::RuntimeTransitionTests.test_plan_rejects_ancestor_descendant_target_slots",
         "tests/test_transition.py::RuntimeTransitionTests.test_db_postcheck_rejects_different_valid_bytes_with_the_same_publication_id",
         "tests/test_transition.py::RuntimeTransitionTests.test_orphan_sweep_treats_live_names_as_literals",
         "tests/test_transition.py::RuntimeTransitionTests.test_symlinked_target_ancestor_is_rejected",
         "tests/test_transition.py::RuntimeTransitionTests.test_corrupt_prepared_marker_cannot_delete_an_incumbent"
       ],
-      "limitations": "The matrix models injected exceptions around filesystem operations. One marker parent is an exclusive ownership root; distinct roots must not overlap or nest. This is not proof against arbitrary kernel, storage-device, administrator, or distributed-filesystem failure."
+      "limitations": "Inputs must be closed and self-contained before entry; SQLite WAL/SHM sidecars are outside the transition. Directory fsync may be unavailable on documented filesystems. One marker parent is an exclusive ownership root, and distinct roots must not overlap or nest. The matrices do not prove behavior under arbitrary kernel, device, administrator, or distributed-filesystem failure."
     },
     {
       "id": "durable-sqlite-state",
-      "statement": "The sample rebuild preserves the selected token and report fields, validates complete typed rows before insertion, rolls back all restored sections on malformed state, and closes SQLite handles on success or failure.",
+      "statement": "The sample rebuild preserves the selected token and report fields, validates complete typed rows and standards-valid JSON before insertion, rolls back every restored section on malformed state, and closes SQLite handles on success or failure.",
       "evidence": [
         "tests/test_sqlite_state.py::DurableSqliteTests.test_rebuild_preserves_credentials_reports_ownership_and_quota_history",
         "tests/test_sqlite_state.py::DurableSqliteTests.test_malformed_durable_row_rolls_back_all_sections",
         "tests/test_sqlite_state.py::DurableSqliteTests.test_strict_restore_rejects_duplicate_durable_rows",
+        "tests/test_sqlite_state.py::DurableSqliteTests.test_insert_rejects_nonstandard_nonfinite_json_constants",
+        "tests/test_sqlite_state.py::DurableSqliteTests.test_restore_rejects_nonstandard_json_and_rolls_back_every_section",
         "tests/test_sqlite_state.py::DurableSqliteTests.test_session_rolls_back_on_exception"
       ],
       "limitations": "The schema is deliberately minimal and synthetic; it is not a general migration framework."

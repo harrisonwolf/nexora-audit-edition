@@ -2,24 +2,50 @@
 
 Nexora Audit Edition is a small, synthetic, executable extraction of reliability
 mechanisms developed during the Nexora no-feature hardening programme. It exists
-so that reviewers can inspect the code, challenge the claims, and run the tests
+so reviewers can inspect the code, challenge bounded claims, and run the tests
 without receiving the private product, its data, its interface, or its history.
 
-This is not a deployable real-estate application, a security certification, or a
-claim that finite tests prove correctness. The public claim boundary is
-machine-readable in [CLAIMS.json](CLAIMS.json).
+This is not a deployable real-estate application, a security certification, or
+proof that finite tests establish correctness. The public claim boundary is
+machine-readable in [CLAIMS.json](CLAIMS.json). The 0.1.1 corrective release and
+its reproduced findings are recorded in
+[the adversarial review](docs/adversarial-review-0.1.1.md).
 
 ## What is included
 
 | Mechanism | Question it addresses | Executable evidence |
 | --- | --- | --- |
-| Manifest-bound artifact integrity | Did the consumer receive the same bytes whose identity, version, size, and digest were checked? | `tests/test_manifest.py` |
-| Atomic publication | Can a validated directory become discoverable under one final name without exposing a partial tree? | `tests/test_publication.py` |
-| Journaled multi-target transition | Can a bounded three-target filesystem transition recover conservatively after each tested interruption point? | `tests/test_transition.py` |
+| Manifest-bound artifact integrity | Did the consumer receive the same bounded bytes whose identity, version, size, and digest were checked? | `tests/test_manifest.py` |
+| Atomic publication | Can a validated directory become discoverable under one final name without exposing a partial tree or reclaiming an incumbent? | `tests/test_publication.py` |
+| Journaled multi-target transition | Can a bounded runtime or build transition recover conservatively after each tested interruption point? | `tests/test_transition.py` |
 | Durable SQLite carry-over | Can selected durable rows survive a volatile database rebuild without accepting malformed state or partial restoration? | `tests/test_sqlite_state.py` |
-| Qualified composition | Does a positive-weighted input without material evidence suppress the composite instead of being silently ignored? | `tests/test_ranking.py` |
+| Qualified composition | Does a positive-weighted input without material evidence suppress the composite instead of disappearing silently? | `tests/test_ranking.py` |
 
 The modules use only the Python standard library at runtime.
+
+## Important mechanics
+
+- Manifest reads are capped at 1 MiB. Payload reads default to 64 MiB and the
+  caller may choose a different positive finite ceiling.
+- Publication synchronizes newly created root links, writes and synchronizes a
+  complete private tree, seals its path set, entry types, permission modes, and
+  unshared regular-file bytes across validation, then re-synchronizes the same
+  snapshot before one direct rename into an absent final name. Every final path
+  already present at preflight—including an empty directory or symlink—is a
+  collision and is left untouched.
+- A transition synchronizes newly created root links and accepts only canonical,
+  physically contained, ancestry-disjoint targets outside its reserved control
+  namespace. Under one root-global lock, it synchronizes the closed incumbent
+  and staged contents, recomputes their identities, and only then writes the
+  first intent marker.
+- Each target rename synchronizes the changed parent before the corresponding
+  completed phase can be recorded. Runtime and web-build generations receive
+  type-specific postchecks before the commit point.
+- Saved-report JSON rejects Python's non-standard `NaN` and infinity tokens
+  without rejecting standards-valid large numeric literals.
+
+These are local mechanisms under a declared cooperative-process model. Read
+[KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) before relying on any of them.
 
 ## Run the audit surface
 
@@ -47,22 +73,21 @@ python -I -c "import nexora_audit; print(nexora_audit.__version__)"
 ## How to review it
 
 Start with [the architecture](docs/architecture.md), then use the fixed
-[audit questions](docs/audit-questions.md). The source lineage and the changes
-made during extraction are recorded in [SOURCE_MAP.md](SOURCE_MAP.md).
-Known boundaries are explicit in [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md).
+[audit questions](docs/audit-questions.md). The source lineage and subsequent
+public hardening are distinguished in [SOURCE_MAP.md](SOURCE_MAP.md).
 
-A coding agent can help search the state space, but its report should be treated
-as an argument to reproduce, not as a certification. Ask it for exact paths,
-line-specific counterexamples, and tests that fail before a proposed fix.
+A coding agent can help search the state space, but its report is an argument
+to reproduce, not a certification. Require exact paths, a concrete failure
+trace, and a test that fails before a proposed fix. False positives and
+documented limitations should be labeled as such.
 
 ## Scope
 
 The edition contains synthetic identities, payloads, and SQLite rows only. It
 does not contain third-party datasets, client information, credentials,
 production configuration, the product interface, or the private repository's
-history. The source map identifies the private baseline by commit, tag, and Git
-blob IDs; those identifiers are provenance attestations, while this repository's
-code and tests stand on their own as the public evidence.
+history. Private source identifiers in the source map are maintainer provenance
+attestations; the public code, tests, and history must carry the public warrant.
 
 ## License
 

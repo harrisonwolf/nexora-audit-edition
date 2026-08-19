@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
 import uuid
+import stat
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -18,6 +20,14 @@ _FSYNC_UNSUPPORTED = frozenset(
         errno.EOPNOTSUPP,
         errno.ENOTSUP if hasattr(errno, "ENOTSUP") else errno.EOPNOTSUPP,
         errno.EROFS,
+    }
+)
+_COLLISION_ERRNOS = frozenset(
+    {
+        errno.EEXIST,
+        errno.ENOTEMPTY,
+        errno.EISDIR,
+        errno.ENOTDIR,
     }
 )
 
@@ -62,6 +72,42 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _ensure_directory_durable(path: Path) -> None:
+    """Create each missing directory and synchronize its parent link."""
+    missing: list[Path] = []
+    current = Path(path)
+    while not current.exists():
+        if current.is_symlink():
+            raise ValueError(f"directory path may not contain a symlink: {current}")
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            raise ValueError(f"directory path has no existing ancestor: {path}")
+        current = parent
+    if current.is_symlink() or not current.is_dir():
+        raise ValueError(f"directory ancestor is not a real directory: {current}")
+
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            pass
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"directory path may contain only real directories: {directory}")
+
+    # Reconcile partial creation from an earlier failed attempt as well as this
+    # call. Every directory link through the filesystem root is retried.
+    current = Path(path)
+    while True:
+        if current.is_symlink() or not current.is_dir():
+            raise ValueError(f"directory path may contain only real directories: {current}")
+        _fsync_directory(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
 def _relative_file(path: str) -> Path:
     relative = Path(path)
     if (
@@ -82,13 +128,57 @@ def _write_durable(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _fsync_regular_file(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        status = os.fstat(descriptor)
+        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+            raise ValueError(f"publication tree entry is not an unshared regular file: {path}")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _tree_snapshot(root: Path) -> tuple[tuple[str, str, int, str], ...]:
+    records: list[tuple[str, str, int, str]] = []
+    entries = (root, *sorted(root.rglob("*")))
+    for entry in entries:
+        status = entry.lstat()
+        relative = "." if entry == root else entry.relative_to(root).as_posix()
+        mode = stat.S_IMODE(status.st_mode)
+        if stat.S_ISDIR(status.st_mode):
+            records.append(("directory", relative, mode, ""))
+        elif stat.S_ISREG(status.st_mode):
+            if status.st_nlink != 1:
+                raise ValueError(
+                    f"publication tree entry is not an unshared regular file: {entry}"
+                )
+            content = entry.read_bytes()
+            records.append(("file", relative, mode, hashlib.sha256(content).hexdigest()))
+        else:
+            raise ValueError(f"publication tree contains a symlink or special entry: {entry}")
+    return tuple(records)
+
+
 def _sync_tree(root: Path) -> None:
     directories = {root}
-    for entry in root.rglob("*"):
-        if entry.is_dir():
+    root_status = root.lstat()
+    if not stat.S_ISDIR(root_status.st_mode):
+        raise ValueError(f"publication staging root is not a real directory: {root}")
+    for entry in sorted(root.rglob("*")):
+        status = entry.lstat()
+        if stat.S_ISDIR(status.st_mode):
             directories.add(entry)
-        else:
+        elif stat.S_ISREG(status.st_mode):
+            _fsync_regular_file(entry)
             directories.add(entry.parent)
+        else:
+            raise ValueError(f"publication tree contains a symlink or special entry: {entry}")
     for directory in sorted(directories, key=lambda value: len(value.parts), reverse=True):
         _fsync_directory(directory)
 
@@ -108,6 +198,13 @@ def discover_publications(root: Path) -> tuple[Path, ...]:
     return tuple(discovered)
 
 
+def _collision(publication_id: str, staging: Path) -> PublicationCollisionError:
+    return PublicationCollisionError(
+        f"publication {publication_id!r} is occupied and was not replaced; "
+        f"the rejected staged tree remains at {staging}"
+    )
+
+
 def publish_atomically(
     root: Path,
     publication_id: str,
@@ -125,14 +222,14 @@ def publish_atomically(
     symlink = _first_symlink_component(root)
     if symlink is not None:
         raise ValueError(f"publication root contains a symlink at {symlink}")
-    root.mkdir(parents=True, exist_ok=True)
+    _ensure_directory_durable(root)
     symlink = _first_symlink_component(root)
     if symlink is not None:
         raise ValueError(f"publication root contains a symlink at {symlink}")
     staging_root = root / _STAGING_NAME
     if staging_root.is_symlink():
         raise ValueError(f"publication staging root may not be a symlink: {staging_root}")
-    staging_root.mkdir(exist_ok=True)
+    _ensure_directory_durable(staging_root)
     if not staging_root.is_dir():
         raise ValueError(f"publication staging root is not a directory: {staging_root}")
     staging = staging_root / uuid.uuid4().hex
@@ -152,24 +249,28 @@ def publish_atomically(
         _write_durable(staging / relative, normalized[relative])
     _write_durable(staging / "manifest.json", normalized[Path("manifest.json")])
     _sync_tree(staging)
+    sealed_snapshot = _tree_snapshot(staging)
     validator(staging)
+    if _tree_snapshot(staging) != sealed_snapshot:
+        raise ValueError("validator modified the sealed publication tree")
+
+    # The callback may have rewritten identical bytes. Synchronize the exact
+    # validated snapshot again, then prove that synchronization saw no drift.
+    _sync_tree(staging)
+    if _tree_snapshot(staging) != sealed_snapshot:
+        raise ValueError("publication tree changed while sealing validated bytes")
 
     final = root / publication_id
-    try:
-        final.mkdir(exist_ok=False)
-    except FileExistsError as exc:
-        raise PublicationCollisionError(
-            f"publication {publication_id!r} already exists and was not replaced; "
-            f"the rejected staged tree remains at {staging}"
-        ) from exc
+    if final.is_symlink() or final.exists():
+        raise _collision(publication_id, staging)
+
     try:
         os.rename(staging, final)
-    except BaseException:
-        try:
-            final.rmdir()
-        except OSError:
-            pass
+    except OSError as exc:
+        if exc.errno in _COLLISION_ERRNOS and (final.is_symlink() or final.exists()):
+            raise _collision(publication_id, staging) from exc
         raise
+
     sync_failure: OSError | None = None
     for parent in (staging_root, root):
         try:

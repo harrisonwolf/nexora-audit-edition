@@ -13,6 +13,7 @@ REQUIRED = {
     ".gitattributes",
     ".gitignore",
     "CLAIMS.json",
+    "docs/adversarial-review-0.1.1.md",
     "KNOWN_LIMITATIONS.md",
     "MANIFEST.in",
     "LICENSE",

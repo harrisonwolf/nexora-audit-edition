@@ -17,6 +17,8 @@ from typing import Collection, NoReturn
 
 
 _HASH_CHUNK_BYTES = 1024 * 1024
+_MAX_MANIFEST_BYTES = 1024 * 1024
+DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
 
 
 class ManifestIntegrityError(RuntimeError):
@@ -65,25 +67,41 @@ def _contained_payload(bundle_dir: Path, declared: object) -> Path:
     return current
 
 
-def _read_regular_file_once(path: Path) -> bytes:
+def _read_regular_file_once(
+    path: Path,
+    *,
+    max_bytes: int,
+    label: str,
+) -> bytes:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        _fail(f"payload is not a readable non-symlink file at {path}: {exc}")
+        _fail(f"{label} is not a readable non-symlink file at {path}: {exc}")
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode):
-            _fail(f"payload is not a regular file at {path}")
+            _fail(f"{label} is not a regular file at {path}")
+        if metadata.st_size > max_bytes:
+            _fail(
+                f"{label} at {path} exceeds the {max_bytes}-byte maximum "
+                f"({metadata.st_size} bytes observed)"
+            )
         chunks: list[bytes] = []
+        observed = 0
         while True:
-            chunk = os.read(descriptor, _HASH_CHUNK_BYTES)
+            chunk = os.read(descriptor, min(_HASH_CHUNK_BYTES, max_bytes - observed + 1))
             if not chunk:
                 break
+            observed += len(chunk)
+            if observed > max_bytes:
+                _fail(f"{label} at {path} grew beyond the {max_bytes}-byte maximum while reading")
             chunks.append(chunk)
         return b"".join(chunks)
+    except OSError as exc:
+        _fail(f"{label} at {path} could not be read: {exc}")
     finally:
         os.close(descriptor)
 
@@ -93,8 +111,11 @@ def verify_and_read(
     *,
     expected_artifact_id: str,
     supported_producer_versions: Collection[str],
+    max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
 ) -> VerifiedArtifact:
     """Verify one bundle and return the exact payload bytes that were hashed."""
+    if type(max_payload_bytes) is not int or max_payload_bytes <= 0:
+        raise ValueError("max_payload_bytes must be a positive integer")
     bundle_dir = Path(bundle_dir)
     if not bundle_dir.is_dir():
         _fail(f"bundle directory does not exist: {bundle_dir}")
@@ -102,8 +123,13 @@ def verify_and_read(
     if manifest_path.is_symlink():
         _fail(f"manifest is a symlink at {manifest_path}")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        manifest_bytes = _read_regular_file_once(
+            manifest_path,
+            max_bytes=_MAX_MANIFEST_BYTES,
+            label="manifest",
+        )
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         _fail(f"manifest is not readable JSON at {manifest_path}: {exc}")
     if not isinstance(manifest, dict):
         _fail("manifest must be a JSON object")
@@ -129,6 +155,11 @@ def verify_and_read(
     declared_size = payload.get("size_bytes")
     if isinstance(declared_size, bool) or not isinstance(declared_size, int) or declared_size < 0:
         _fail(f"payload size declaration is malformed: {declared_size!r}")
+    if declared_size > max_payload_bytes:
+        _fail(
+            f"payload size {declared_size} exceeds the configured "
+            f"{max_payload_bytes}-byte maximum"
+        )
     declared_digest = payload.get("sha256")
     if (
         not isinstance(declared_digest, str)
@@ -137,7 +168,11 @@ def verify_and_read(
     ):
         _fail(f"payload digest declaration is malformed: {declared_digest!r}")
 
-    content = _read_regular_file_once(payload_path)
+    content = _read_regular_file_once(
+        payload_path,
+        max_bytes=max_payload_bytes,
+        label="payload",
+    )
     observed_size = len(content)
     if observed_size != declared_size:
         _fail(f"payload size mismatch: declared {declared_size}, read {observed_size}")

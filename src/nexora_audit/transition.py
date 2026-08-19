@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import shutil
 import sqlite3
 import uuid
@@ -157,14 +158,20 @@ def identity_of(path: Path) -> dict[str, Any]:
                 raise TransitionCorruptionError(
                     f"Transition target {path} contains a symlink at {relative}; refusing to journal it."
                 )
-            if entry.is_dir():
+            entry_mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISDIR(entry_mode):
                 digest.update(f"D\0{relative}\0\n".encode("utf-8"))
                 continue
+            if not stat.S_ISREG(entry_mode):
+                raise TransitionCorruptionError(
+                    f"Transition target {path} contains a non-regular entry at {relative}."
+                )
             size, file_digest = _file_digest(entry)
             entries += 1
             digest.update(f"F\0{relative}\0{size}\0{file_digest}\n".encode("utf-8"))
         return {"kind": "dir", "entries": entries, "digest": digest.hexdigest()}
-    if path.is_file():
+    path_mode = path.stat(follow_symlinks=False).st_mode
+    if stat.S_ISREG(path_mode):
         size, file_digest = _file_digest(path)
         return {"kind": "file", "size": size, "digest": file_digest}
     raise TransitionCorruptionError(f"Transition target {path} is neither a file nor a directory.")
@@ -223,13 +230,140 @@ def _fsync_dir(path: Path) -> None:
         os.close(handle)
 
 
+def _ensure_directory_durable(path: Path) -> None:
+    """Create each missing directory and synchronize its parent link."""
+    missing: list[Path] = []
+    current = Path(path)
+    while not current.exists():
+        if current.is_symlink():
+            raise TransitionCorruptionError(
+                f"Transition root path may not contain a symlink: {current}."
+            )
+        missing.append(current)
+        parent = current.parent
+        if parent == current:
+            raise TransitionCorruptionError(
+                f"Transition root path has no existing ancestor: {path}."
+            )
+        current = parent
+    if current.is_symlink() or not current.is_dir():
+        raise TransitionCorruptionError(
+            f"Transition root ancestor is not a real directory: {current}."
+        )
+
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            pass
+        if directory.is_symlink() or not directory.is_dir():
+            raise TransitionCorruptionError(
+                f"Transition root path may contain only real directories: {directory}."
+            )
+
+    # A failed earlier sync may have left created directories behind. Retrying
+    # the full ancestry makes that partial state reconcilable.
+    current = Path(path)
+    while True:
+        if current.is_symlink() or not current.is_dir():
+            raise TransitionCorruptionError(
+                f"Transition root path may contain only real directories: {current}."
+            )
+        _fsync_dir(current)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+
+
+def _fsync_regular_file(path: Path) -> None:
+    """Synchronize one non-symlink regular file without requiring write access."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise TransitionCorruptionError(
+                f"Transition input {path} is not a regular file and cannot be synchronized."
+            )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _ancestor_chain(start: Path, root: Path) -> tuple[Path, ...]:
+    """Return directory parents from start through the owned root."""
+    chain: list[Path] = []
+    current = start
+    while True:
+        chain.append(current)
+        if current == root:
+            return tuple(chain)
+        if root not in current.parents:
+            raise TransitionCorruptionError(
+                f"Transition input parent {start} is outside the owned root {root}."
+            )
+        current = current.parent
+
+
+def _synchronize_transition_target(marker_path: Path, path: Path) -> None:
+    """Flush one closed target and its containing directory entries."""
+    if path.is_symlink() or not path.exists():
+        raise _fail(marker_path, f"transition input {path} disappeared or became a symlink")
+
+    directories: set[Path] = set()
+    path_mode = path.stat(follow_symlinks=False).st_mode
+    if stat.S_ISREG(path_mode):
+        _fsync_regular_file(path)
+    elif stat.S_ISDIR(path_mode):
+        directories.add(path)
+        for entry in sorted(path.rglob("*")):
+            if entry.is_symlink():
+                raise _fail(marker_path, f"transition input {path} contains a symlink at {entry}")
+            entry_mode = entry.stat(follow_symlinks=False).st_mode
+            if stat.S_ISDIR(entry_mode):
+                directories.add(entry)
+            elif stat.S_ISREG(entry_mode):
+                _fsync_regular_file(entry)
+                directories.add(entry.parent)
+            else:
+                raise _fail(
+                    marker_path,
+                    f"transition input {path} contains a non-regular entry at {entry}",
+                )
+    else:
+        raise _fail(marker_path, f"transition input {path} is not a regular file or directory")
+
+    root = marker_path.parent
+    directories.update(_ancestor_chain(path.parent, root))
+    for directory in sorted(directories, key=lambda value: len(value.parts), reverse=True):
+        _fsync_dir(directory)
+
+
+def _synchronize_entry_targets(marker_path: Path, record: Mapping[str, Any]) -> None:
+    """Make incumbent and staged target contents durable before journal intent."""
+    synchronized: set[Path] = set()
+    for target in record["targets"]:
+        for slot, identity_field in (("live", "old_identity"), ("stage", "new_identity")):
+            path = Path(target[slot])
+            if target[identity_field]["kind"] == "absent" or path in synchronized:
+                continue
+            _synchronize_transition_target(marker_path, path)
+            synchronized.add(path)
+
+
 def _fsync_marker_parent(marker_path: Path) -> None:
     _fsync_dir(marker_path.parent)
 
 
 def _require_safe_marker_path(marker_path: Path) -> None:
-    if not marker_path.is_absolute():
-        raise TransitionCorruptionError(f"Transition marker path must be absolute: {marker_path}")
+    if not marker_path.is_absolute() or ".." in marker_path.parts:
+        raise TransitionCorruptionError(
+            f"Transition marker path must be canonical absolute without parent segments: {marker_path}"
+        )
     symlink = _first_symlink_component(marker_path)
     if symlink is not None:
         raise TransitionCorruptionError(
@@ -242,7 +376,7 @@ def transition_lock(marker_path: Path) -> Iterable[None]:
     """Acquire the non-blocking process lock for the whole owned root."""
     marker_path = Path(marker_path)
     _require_safe_marker_path(marker_path)
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory_durable(marker_path.parent)
     _require_safe_marker_path(marker_path)
     lock_path = marker_path.parent / LOCK_FILE_NAME
     flags = os.O_RDWR | os.O_CREAT
@@ -276,7 +410,7 @@ def _write_marker_unlocked(marker_path: Path, record: Mapping[str, Any]) -> None
     record. A temporary residue may survive; it is never authoritative.
     """
     payload = _serialize_marker(record)
-    marker_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_directory_durable(marker_path.parent)
     temp_path = marker_path.with_name(f"{marker_path.name}.{uuid.uuid4().hex}.tmp")
     try:
         _write_temp_marker(temp_path, payload)
@@ -330,6 +464,45 @@ def _require_contained(marker_path: Path, root: Path, candidate: Any, *, field: 
     return path
 
 
+def _marker_temp_name(name: str) -> bool:
+    prefix, separator, tail = name.rpartition(f"{MARKER_SUFFIX}.")
+    if not separator or not _SCOPE_ID.fullmatch(prefix):
+        return False
+    token, dot, extension = tail.partition(".")
+    return (
+        dot == "."
+        and extension == "tmp"
+        and len(token) == 32
+        and all(character in "0123456789abcdef" for character in token)
+    )
+
+
+def _require_data_slot(
+    marker_path: Path,
+    root: Path,
+    path: Path,
+    *,
+    field: str,
+) -> None:
+    relative = path.relative_to(root)
+    if not relative.parts:
+        raise _fail(marker_path, f"target {field} reuses the transition ownership root")
+    control_name = relative.parts[0]
+    if (
+        control_name == LOCK_FILE_NAME
+        or control_name.endswith(MARKER_SUFFIX)
+        or _marker_temp_name(control_name)
+    ):
+        raise _fail(
+            marker_path,
+            f"target {field} enters reserved transition control namespace {control_name!r}",
+        )
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
 def _validate_identity(marker_path: Path, value: Any, *, field: str) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("kind") not in _IDENTITY_KINDS:
         raise _fail(marker_path, f"{field} is not a known identity record")
@@ -357,6 +530,7 @@ def _validate_identity(marker_path: Path, value: Any, *, field: str) -> dict[str
 
 
 def _validate_record(marker_path: Path, record: Any) -> dict[str, Any]:
+    _require_safe_marker_path(marker_path)
     if not isinstance(record, dict):
         raise _fail(marker_path, "the record is not a JSON object")
     if set(record) != _MARKER_FIELDS:
@@ -371,7 +545,7 @@ def _validate_record(marker_path: Path, record: Any) -> dict[str, Any]:
     kind = record["kind"]
     if kind not in KIND_TARGETS:
         raise _fail(marker_path, f"transition kind {kind!r} is unknown")
-    all_slots: set[str] = set()
+    all_slots: list[tuple[str, Path]] = []
     for field in ("scope_id", "publication_id"):
         if not isinstance(record[field], str) or not record[field]:
             raise _fail(marker_path, f"{field} is missing")
@@ -400,10 +574,18 @@ def _validate_record(marker_path: Path, record: Any) -> dict[str, Any]:
             raise _fail(marker_path, f"target {expected_name} live/stage/backup are not siblings")
         if len({str(slot) for slot in slots.values()}) != 3:
             raise _fail(marker_path, f"target {expected_name} reuses one path for two slots")
-        for slot in slots.values():
-            if str(slot) in all_slots:
-                raise _fail(marker_path, f"target {expected_name} aliases another target path")
-            all_slots.add(str(slot))
+        for field, slot in slots.items():
+            label = f"{expected_name}.{field}"
+            _require_data_slot(marker_path, root, slot, field=label)
+            for prior_label, prior_slot in all_slots:
+                if slot == prior_slot:
+                    raise _fail(marker_path, f"target {label} aliases {prior_label}")
+                if _paths_overlap(slot, prior_slot):
+                    raise _fail(
+                        marker_path,
+                        f"target {label} has an ancestor/descendant overlap with {prior_label}",
+                    )
+            all_slots.append((label, slot))
         old_identity = _validate_identity(marker_path, target["old_identity"], field=f"{expected_name}.old_identity")
         _validate_identity(marker_path, target["new_identity"], field=f"{expected_name}.new_identity")
         old_existed = target["old_existed"]
@@ -476,6 +658,7 @@ def plan_transition(
     """Record the identities this transition is allowed to move between."""
     if kind not in KIND_TARGETS:
         raise ValueError(f"Unknown transition kind {kind!r}.")
+    _require_safe_marker_path(marker_path)
     planned: list[dict[str, Any]] = []
     for name, live, stage, backup in targets:
         old_identity = identity_of(live)
@@ -653,6 +836,10 @@ def _postcheck_build(record: Mapping[str, Any], target: Mapping[str, Any]) -> No
         raise TransitionPostcheckError(
             f"Web build publication marker {marker} is unreadable ({exc}); rebuild the staged tree."
         ) from exc
+    if not isinstance(internal, dict):
+        raise TransitionPostcheckError(
+            f"Web build publication marker {marker} must contain one JSON object; rebuild the staged tree."
+        )
     if internal.get("publication_id") != record["publication_id"]:
         raise TransitionPostcheckError(
             f"Web build {build_dir} names publication {internal.get('publication_id')!r} but the "
@@ -677,7 +864,11 @@ def _verify_new_generation(record: Mapping[str, Any]) -> None:
 
 
 def _rename(source: Path, target: Path) -> None:
+    source = Path(source)
+    target = Path(target)
     source.replace(target)
+    for parent in sorted({source.parent, target.parent}):
+        _fsync_dir(parent)
 
 
 def _remove(path: Path) -> None:
@@ -708,6 +899,8 @@ def _validated_entry_record(
     if current["phase"] != "prepared":
         raise _fail(marker_path, f"entry phase {current['phase']!r} is not 'prepared'")
     require_no_pending_transition(marker_path)
+    _check_precommit_phase_legality(marker_path, current)
+    _synchronize_entry_targets(marker_path, current)
     _check_precommit_phase_legality(marker_path, current)
     return current
 

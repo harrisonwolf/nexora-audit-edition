@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import sys
+import tomllib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+import nexora_audit
+
 EXPECTED_CLAIMS = {
     "manifest-bound-integrity",
     "atomic-publication",
@@ -34,7 +40,16 @@ class PublicClaimTests(unittest.TestCase):
                 self.assertTrue(path.is_file(), selector)
                 source = path.read_text(encoding="utf-8")
                 method = test_name.rsplit(".", 1)[-1]
+
                 self.assertIn(f"def {method}(", source, selector)
+
+    def test_release_version_is_one_consistent_public_identity(self) -> None:
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        claims = json.loads((ROOT / "CLAIMS.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(nexora_audit.__version__, "0.1.1")
+        self.assertEqual(project["project"]["version"], nexora_audit.__version__)
+        self.assertEqual(claims["scope"], f"Nexora Audit Edition {nexora_audit.__version__}")
 
 
 if __name__ == "__main__":

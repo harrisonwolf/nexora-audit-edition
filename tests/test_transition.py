@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import multiprocessing
-import sys
+import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,8 +12,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from nexora_audit.sqlite_state import create_runtime_database
 from nexora_audit import transition
+from nexora_audit.sqlite_state import create_runtime_database
 
 
 def _hold_transition_lock(marker: str, ready: object, release: object) -> None:
@@ -23,7 +24,7 @@ def _hold_transition_lock(marker: str, ready: object, release: object) -> None:
 
 class RuntimeTransitionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temp = tempfile.TemporaryDirectory()
+        self.temp = tempfile.TemporaryDirectory(dir="/tmp")
         self.root = Path(self.temp.name)
         self.marker = transition.marker_path_for(self.root, "synthetic")
 
@@ -67,6 +68,41 @@ class RuntimeTransitionTests(unittest.TestCase):
         record, paths, _ = self._planned_under(self.root)
         return record, paths
 
+    @staticmethod
+    def _build_tree(path: Path, publication_id: str) -> None:
+        path.mkdir(parents=True)
+        for entry in transition.BUILD_REQUIRED_ENTRIES:
+            if entry == transition.BUILD_PUBLICATION_FILE:
+                (path / entry).write_text(
+                    json.dumps({"publication_id": publication_id}) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                (path / entry).write_text(f"{publication_id}:{entry}\n", encoding="utf-8")
+
+    def _planned_build_under(
+        self,
+        root: Path,
+        *,
+        nested: bool = False,
+    ) -> tuple[dict[str, object], dict[str, Path], Path]:
+        marker = transition.marker_path_for(root, "build-synthetic")
+        token = transition.new_transition_token()
+        parent = root / "nested" if nested else root
+        parent.mkdir(parents=True, exist_ok=True)
+        live = parent / "build"
+        stage, backup = transition.stage_and_backup_for(live, token)
+        self._build_tree(live, "old")
+        self._build_tree(stage, "new")
+        record = transition.plan_transition(
+            kind="build",
+            scope_id="build-synthetic",
+            publication_id="new",
+            marker_path=marker,
+            targets=(("build", live, stage, backup),),
+        )
+        return record, {"live": live, "stage": stage, "backup": backup}, marker
+
     def test_complete_transition_installs_one_coherent_generation(self) -> None:
         record, paths = self._planned()
         transition.run_transition(self.marker, record)
@@ -75,6 +111,221 @@ class RuntimeTransitionTests(unittest.TestCase):
             self.assertFalse(paths[f"{name}_stage"].exists())
             self.assertFalse(paths[f"{name}_backup"].exists())
         self.assertEqual((paths["thumbs_live"] / "value.txt").read_text(encoding="utf-8"), "new")
+
+    def test_complete_build_transition_installs_one_coherent_generation(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root)
+
+        transition.run_transition(marker, record)
+
+        self.assertFalse(marker.exists())
+        self.assertFalse(paths["stage"].exists())
+        self.assertFalse(paths["backup"].exists())
+        self.assertEqual(
+            json.loads((paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text(encoding="utf-8")),
+            {"publication_id": "new"},
+        )
+
+    def test_every_interrupted_build_rename_recovers_the_old_generation(self) -> None:
+        for failure_at in (1, 2):
+            with self.subTest(failure_at=failure_at):
+                root = self.root / f"build-fault-{failure_at}"
+                root.mkdir()
+                record, paths, marker = self._planned_build_under(root)
+                real_rename = transition._rename
+                calls = 0
+
+                def fail_at_selected_rename(source: Path, target: Path) -> None:
+                    nonlocal calls
+                    calls += 1
+                    if calls == failure_at:
+                        raise OSError(f"synthetic build interruption {failure_at}")
+                    real_rename(source, target)
+
+                with patch.object(transition, "_rename", side_effect=fail_at_selected_rename):
+                    with self.assertRaisesRegex(OSError, "synthetic build interruption"):
+                        transition.run_transition(marker, record)
+
+                self.assertEqual(transition.resolve_pending_transition(marker), "restored_old")
+                self.assertEqual(
+                    json.loads(
+                        (paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text(encoding="utf-8")
+                    ),
+                    {"publication_id": "old"},
+                )
+
+    def test_completed_phases_follow_nested_target_parent_synchronization(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root, nested=True)
+        events: list[tuple[str, object]] = []
+        real_sync = transition._fsync_dir
+        real_write = transition._write_marker_unlocked
+
+        def record_sync(path: Path) -> None:
+            events.append(("sync", path))
+            real_sync(path)
+
+        def record_phase(path: Path, current: object) -> None:
+            events.append(("phase", current["phase"]))  # type: ignore[index]
+            real_write(path, current)  # type: ignore[arg-type]
+
+        with (
+            patch.object(transition, "_fsync_dir", side_effect=record_sync),
+            patch.object(transition, "_write_marker_unlocked", side_effect=record_phase),
+        ):
+            transition.run_transition(marker, record)
+
+        parent = paths["live"].parent
+        for completed_phase in ("backed_up_build", "installed_build"):
+            phase_index = events.index(("phase", completed_phase))
+            prior_phase = (
+                "intent_backup_build"
+                if completed_phase == "backed_up_build"
+                else "intent_install_build"
+            )
+            prior_index = events.index(("phase", prior_phase))
+            self.assertIn(("sync", parent), events[prior_index + 1 : phase_index])
+
+    def test_entry_synchronizes_live_and_stage_contents_before_prepared_marker(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root, nested=True)
+        for slot in (paths["live"], paths["stage"]):
+            nested = slot / "nested"
+            nested.mkdir()
+            (nested / "metadata.txt").write_text("durable\n", encoding="utf-8")
+        record = transition.plan_transition(
+            kind="build",
+            scope_id="build-synthetic",
+            publication_id="new",
+            marker_path=marker,
+            targets=(("build", paths["live"], paths["stage"], paths["backup"]),),
+        )
+
+        events: list[tuple[str, object]] = []
+        expected_files = {
+            entry
+            for slot in (paths["live"], paths["stage"])
+            for entry in slot.rglob("*")
+            if entry.is_file()
+        }
+        expected_directories = {
+            entry
+            for slot in (paths["live"], paths["stage"])
+            for entry in slot.rglob("*")
+            if entry.is_dir()
+        }
+        for slot in (paths["live"], paths["stage"]):
+            expected_directories.add(slot)
+            expected_directories.update(transition._ancestor_chain(slot.parent, marker.parent))
+        current = marker.parent
+        while True:
+            expected_directories.add(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+
+        real_file_sync = transition._fsync_regular_file
+        real_dir_sync = transition._fsync_dir
+        real_write = transition._write_marker_unlocked
+
+        def record_file_sync(path: Path) -> None:
+            events.append(("file-sync", path))
+            real_file_sync(path)
+
+        def record_dir_sync(path: Path) -> None:
+            events.append(("dir-sync", path))
+            real_dir_sync(path)
+
+        def record_phase(path: Path, current: object) -> None:
+            events.append(("phase", current["phase"]))  # type: ignore[index]
+            real_write(path, current)  # type: ignore[arg-type]
+
+        with (
+            patch.object(transition, "_fsync_regular_file", side_effect=record_file_sync),
+            patch.object(transition, "_fsync_dir", side_effect=record_dir_sync),
+            patch.object(transition, "_write_marker_unlocked", side_effect=record_phase),
+        ):
+            transition.run_transition(marker, record)
+
+        prepared_index = events.index(("phase", "prepared"))
+        observed_files = {
+            value for kind, value in events[:prepared_index] if kind == "file-sync"
+        }
+        observed_directories = {
+            value for kind, value in events[:prepared_index] if kind == "dir-sync"
+        }
+        self.assertEqual(observed_files, expected_files)
+        self.assertEqual(observed_directories, expected_directories)
+
+    def test_input_content_sync_failure_leaves_no_marker_or_mutation(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root)
+        rejected = paths["stage"] / "app.js"
+        real_sync = transition._fsync_regular_file
+
+        def fail_selected_file(path: Path) -> None:
+            if path == rejected:
+                raise OSError("synthetic input-content sync failure")
+            real_sync(path)
+
+        with patch.object(transition, "_fsync_regular_file", side_effect=fail_selected_file):
+            with self.assertRaisesRegex(OSError, "input-content sync failure"):
+                transition.run_transition(marker, record)
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(
+            json.loads((paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text()),
+            {"publication_id": "old"},
+        )
+        self.assertEqual(
+            json.loads((paths["stage"] / transition.BUILD_PUBLICATION_FILE).read_text()),
+            {"publication_id": "new"},
+        )
+        self.assertFalse(paths["backup"].exists())
+
+    def test_entry_revalidates_identity_after_content_synchronization(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root)
+        real_sync = transition._synchronize_entry_targets
+
+        def mutate_after_sync(marker_path: Path, current: object) -> None:
+            real_sync(marker_path, current)  # type: ignore[arg-type]
+            (paths["stage"] / "app.js").write_text("changed after synchronization\n")
+
+        with patch.object(transition, "_synchronize_entry_targets", side_effect=mutate_after_sync):
+            with self.assertRaises(transition.TransitionCorruptionError):
+                transition.run_transition(marker, record)
+
+        self.assertFalse(marker.exists())
+        self.assertTrue(paths["live"].exists())
+        self.assertTrue(paths["stage"].exists())
+        self.assertFalse(paths["backup"].exists())
+
+    def test_target_parent_sync_failure_leaves_an_intent_phase_recoverable(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root, nested=True)
+        parent = paths["live"].parent
+        real_sync = transition._fsync_dir
+        failed = False
+
+        def fail_first_post_rename_target_parent_sync(path: Path) -> None:
+            nonlocal failed
+            if path == parent and paths["backup"].exists() and not failed:
+                failed = True
+                raise OSError("synthetic target-parent sync failure")
+            real_sync(path)
+
+        with patch.object(
+            transition,
+            "_fsync_dir",
+            side_effect=fail_first_post_rename_target_parent_sync,
+        ):
+            with self.assertRaisesRegex(OSError, "target-parent sync failure"):
+                transition.run_transition(marker, record)
+
+        visible = transition.read_marker(marker)
+        self.assertIsNotNone(visible)
+        self.assertEqual(visible["phase"], "intent_backup_build")  # type: ignore[index]
+        self.assertEqual(transition.resolve_pending_transition(marker), "restored_old")
+        self.assertEqual(
+            json.loads((paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text(encoding="utf-8")),
+            {"publication_id": "old"},
+        )
 
     def test_interrupted_precommit_transition_recovers_the_old_generation(self) -> None:
         record, paths = self._planned()
@@ -123,6 +374,57 @@ class RuntimeTransitionTests(unittest.TestCase):
                         (paths[f"{name}_live"] / "value.txt").read_text(encoding="utf-8"),
                         "old",
                     )
+
+    def test_every_marker_publication_interruption_reaches_a_coherent_terminal_state(self) -> None:
+        outcomes = {"old": 0, "new": 0}
+        phase_count = len(transition.phase_sequence(transition.RUNTIME_TARGETS))
+        for failure_at in range(1, phase_count + 1):
+            for timing in ("before", "after"):
+                with self.subTest(failure_at=failure_at, timing=timing):
+                    root = self.root / f"marker-{failure_at}-{timing}"
+                    root.mkdir()
+                    record, _paths, marker = self._planned_under(root)
+                    real_write = transition._write_marker_unlocked
+                    calls = 0
+
+                    def interrupt_selected_publication(
+                        path: Path,
+                        current: object,
+                    ) -> None:
+                        nonlocal calls
+                        calls += 1
+                        if calls == failure_at and timing == "before":
+                            raise OSError(f"synthetic marker interruption {failure_at} before")
+                        real_write(path, current)  # type: ignore[arg-type]
+                        if calls == failure_at and timing == "after":
+                            raise OSError(f"synthetic marker interruption {failure_at} after")
+
+                    with patch.object(
+                        transition,
+                        "_write_marker_unlocked",
+                        side_effect=interrupt_selected_publication,
+                    ):
+                        with self.assertRaisesRegex(OSError, "synthetic marker interruption"):
+                            transition.run_transition(marker, record)
+
+                    if marker.exists():
+                        transition.resolve_pending_transition(marker)
+                    self.assertFalse(marker.exists())
+
+                    expected = (
+                        "new"
+                        if (failure_at == phase_count or (failure_at == phase_count - 1 and timing == "after"))
+                        else "old"
+                    )
+                    outcomes[expected] += 1
+                    expected_identity_key = "new_identity" if expected == "new" else "old_identity"
+                    for target in record["targets"]:  # type: ignore[index]
+                        self.assertEqual(
+                            transition.identity_of(Path(target["live"])),
+                            target[expected_identity_key],
+                        )
+
+        self.assertEqual(outcomes, {"old": 27, "new": 3})
 
     def test_interrupted_recovery_is_idempotently_resumable(self) -> None:
         record, paths = self._planned()
@@ -216,6 +518,225 @@ class RuntimeTransitionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scope_id"):
             transition.marker_path_for(self.root, "../escape")
 
+    def test_plan_rejects_transition_control_paths_and_namespaces(self) -> None:
+        for control_index in range(4):
+            for slot_name in ("live", "stage", "backup"):
+                with self.subTest(control_index=control_index, slot=slot_name):
+                    root = self.root / f"control-{control_index}-{slot_name}"
+                    root.mkdir()
+                    marker = transition.marker_path_for(root, "synthetic")
+                    live = root / "build"
+                    stage, backup = transition.stage_and_backup_for(live, "token")
+                    self._build_tree(live, "old")
+                    self._build_tree(stage, "new")
+                    candidates = (
+                        marker,
+                        root / transition.LOCK_FILE_NAME,
+                        transition.marker_path_for(root, "other"),
+                        root / f"{marker.name}.{'0' * 32}.tmp",
+                    )
+                    slots = {"live": live, "stage": stage, "backup": backup}
+                    slots[slot_name] = candidates[control_index]
+
+                    with self.assertRaisesRegex(
+                        transition.TransitionCorruptionError,
+                        "control|reserved",
+                    ):
+                        transition.plan_transition(
+                            kind="build",
+                            scope_id="synthetic",
+                            publication_id="new",
+                            marker_path=marker,
+                            targets=(("build", slots["live"], slots["stage"], slots["backup"]),),
+                        )
+
+    def test_plan_allows_marker_like_data_name_outside_the_reserved_namespace(self) -> None:
+        live = self.root / "asset.transition.json.data"
+        stage, backup = transition.stage_and_backup_for(live, "token")
+        self._build_tree(live, "old")
+        self._build_tree(stage, "new")
+
+        record = transition.plan_transition(
+            kind="build",
+            scope_id="synthetic",
+            publication_id="new",
+            marker_path=self.marker,
+            targets=(("build", live, stage, backup),),
+        )
+
+        self.assertEqual(record["phase"], "prepared")
+
+    def test_run_rejects_a_forged_control_alias_before_mutation(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root)
+        forged = json.loads(json.dumps(record))
+        forged["targets"][0]["live"] = str(marker)
+        forged["targets"][0]["old_existed"] = False
+        forged["targets"][0]["old_identity"] = dict(transition.ABSENT)
+        staged_before = transition.identity_of(paths["stage"])
+
+        with self.assertRaisesRegex(transition.TransitionCorruptionError, "control|reserved"):
+            transition.run_transition(marker, forged)
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(transition.identity_of(paths["stage"]), staged_before)
+
+    def test_plan_allows_nested_but_disjoint_runtime_target_parents(self) -> None:
+        token = transition.new_transition_token()
+        targets = []
+        for name, live in (
+            ("db", self.root / "state" / "runtime.db"),
+            ("thumbs", self.root / "assets" / "thumbs"),
+            ("photos", self.root / "assets" / "photos"),
+        ):
+            live.parent.mkdir(parents=True, exist_ok=True)
+            stage, backup = transition.stage_and_backup_for(live, token)
+            if name == "db":
+                create_runtime_database(live, publication_id="old")
+                create_runtime_database(stage, publication_id="new")
+            else:
+                self._tree(live, "old")
+                self._tree(stage, "new")
+            targets.append((name, live, stage, backup))
+
+        record = transition.plan_transition(
+            kind="runtime",
+            scope_id="synthetic",
+            publication_id="new",
+            marker_path=self.marker,
+            targets=tuple(targets),
+        )
+
+        self.assertEqual([target["name"] for target in record["targets"]], list(transition.RUNTIME_TARGETS))
+
+    def test_plan_rejects_ancestor_descendant_target_slots(self) -> None:
+        token = transition.new_transition_token()
+        db_live = self.root / "db"
+        db_stage, db_backup = transition.stage_and_backup_for(db_live, token)
+        create_runtime_database(db_live, publication_id="old")
+        create_runtime_database(db_stage, publication_id="new")
+
+        thumbs_live = self.root / "thumbs"
+        thumbs_stage, thumbs_backup = transition.stage_and_backup_for(thumbs_live, token)
+        self._tree(thumbs_live / "photos", "old-photos")
+        self._tree(thumbs_live / f"photos.{token}.stage", "new-photos")
+        self._tree(thumbs_stage, "new-thumbs")
+        photos_live = thumbs_live / "photos"
+        photos_stage = thumbs_live / f"photos.{token}.stage"
+        photos_backup = thumbs_live / f"photos.{token}.backup"
+
+        with self.assertRaisesRegex(transition.TransitionCorruptionError, "overlap|ancestor"):
+            transition.plan_transition(
+                kind="runtime",
+                scope_id="synthetic",
+                publication_id="new",
+                marker_path=self.marker,
+                targets=(
+                    ("db", db_live, db_stage, db_backup),
+                    ("thumbs", thumbs_live, thumbs_stage, thumbs_backup),
+                    ("photos", photos_live, photos_stage, photos_backup),
+                ),
+            )
+
+    def test_non_object_build_marker_is_a_controlled_postcheck_failure(self) -> None:
+        _record, paths, marker = self._planned_build_under(self.root)
+        (paths["stage"] / transition.BUILD_PUBLICATION_FILE).write_text("[]\n", encoding="utf-8")
+        record = transition.plan_transition(
+            kind="build",
+            scope_id="build-synthetic",
+            publication_id="new",
+            marker_path=marker,
+            targets=(("build", paths["live"], paths["stage"], paths["backup"]),),
+        )
+
+        with self.assertRaisesRegex(transition.TransitionPostcheckError, "JSON object"):
+            transition.run_transition_with_recovery(marker, record)
+
+        self.assertFalse(marker.exists())
+        self.assertEqual(
+            json.loads((paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text(encoding="utf-8")),
+            {"publication_id": "old"},
+        )
+
+    def test_build_postchecks_fail_closed_for_missing_malformed_or_mismatched_metadata(self) -> None:
+        cases = (
+            (
+                "missing-entry",
+                lambda stage: (stage / "app.js").unlink(),
+                "without app.js",
+            ),
+            (
+                "malformed-json",
+                lambda stage: (stage / transition.BUILD_PUBLICATION_FILE).write_text(
+                    "{\n", encoding="utf-8"
+                ),
+                "unreadable",
+            ),
+            (
+                "mismatched-publication",
+                lambda stage: (stage / transition.BUILD_PUBLICATION_FILE).write_text(
+                    '{"publication_id": "other"}\n', encoding="utf-8"
+                ),
+                "names publication",
+            ),
+        )
+        for name, mutate, message in cases:
+            with self.subTest(name=name):
+                root = self.root / name
+                root.mkdir()
+                _record, paths, marker = self._planned_build_under(root)
+                mutate(paths["stage"])
+                record = transition.plan_transition(
+                    kind="build",
+                    scope_id="build-synthetic",
+                    publication_id="new",
+                    marker_path=marker,
+                    targets=(("build", paths["live"], paths["stage"], paths["backup"]),),
+                )
+
+                with self.assertRaisesRegex(transition.TransitionPostcheckError, message):
+                    transition.run_transition_with_recovery(marker, record)
+
+                self.assertFalse(marker.exists())
+                self.assertEqual(
+                    json.loads(
+                        (paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text(
+                            encoding="utf-8"
+                        )
+                    ),
+                    {"publication_id": "old"},
+                )
+
+    def test_postcommit_build_cleanup_interruption_keeps_verified_new_generation(self) -> None:
+        record, paths, marker = self._planned_build_under(self.root)
+
+        with patch.object(
+            transition,
+            "_delete_residue",
+            side_effect=OSError("synthetic postcommit cleanup interruption"),
+        ):
+            with self.assertRaisesRegex(OSError, "cleanup interruption"):
+                transition.run_transition(marker, record)
+
+        visible = transition.read_marker(marker)
+        self.assertIsNotNone(visible)
+        self.assertEqual(visible["phase"], "cleanup")  # type: ignore[index]
+        self.assertEqual(transition.resolve_pending_transition(marker), "kept_new")
+        self.assertEqual(
+            json.loads(
+                (paths["live"] / transition.BUILD_PUBLICATION_FILE).read_text(encoding="utf-8")
+            ),
+            {"publication_id": "new"},
+        )
+
+    def test_identity_rejects_special_entries_instead_of_opening_them(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as posix_name:
+            target = Path(posix_name) / "target"
+            target.mkdir()
+            os.mkfifo(target / "pipe")
+
+            with self.assertRaisesRegex(transition.TransitionCorruptionError, "non-regular"):
+                transition.identity_of(target)
+
     def test_symlinked_target_ancestor_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as external_name:
             external = Path(external_name)
@@ -275,6 +796,53 @@ class RuntimeTransitionTests(unittest.TestCase):
             with self.assertRaises(transition.TransitionBusyError):
                 transition.run_transition(self.marker, record)
 
+    def test_new_transition_root_is_durably_linked_from_its_parent(self) -> None:
+        owned_root = self.root / "outer" / "owned"
+        marker = transition.marker_path_for(owned_root, "synthetic")
+        observed: list[Path] = []
+        real_sync = transition._fsync_dir
+
+        def record(path: Path) -> None:
+            observed.append(path)
+            real_sync(path)
+
+        with patch.object(transition, "_fsync_dir", side_effect=record):
+            with transition.transition_lock(marker):
+                pass
+
+        self.assertIn(self.root, observed)
+        self.assertIn(self.root / "outer", observed)
+
+
+    def test_root_creation_retry_resynchronizes_prior_ancestor_links(self) -> None:
+        owned_root = self.root / "outer" / "owned"
+        marker = transition.marker_path_for(owned_root, "synthetic")
+        real_sync = transition._fsync_dir
+        failed = False
+
+        def fail_once(path: Path) -> None:
+            nonlocal failed
+            if path == self.root and not failed:
+                failed = True
+                raise OSError("synthetic ancestor sync failure")
+            real_sync(path)
+
+        with patch.object(transition, "_fsync_dir", side_effect=fail_once):
+            with self.assertRaises(OSError):
+                with transition.transition_lock(marker):
+                    pass
+
+        observed: list[Path] = []
+
+        def record(path: Path) -> None:
+            observed.append(path)
+            real_sync(path)
+
+        with patch.object(transition, "_fsync_dir", side_effect=record):
+            with transition.transition_lock(marker):
+                pass
+
+        self.assertIn(self.root, observed)
     def test_transition_lock_excludes_another_process(self) -> None:
         context = multiprocessing.get_context("fork")
         ready = context.Event()
@@ -307,6 +875,41 @@ class RuntimeTransitionTests(unittest.TestCase):
         self.assertEqual((paths["thumbs_live"] / "value.txt").read_text(encoding="utf-8"), "old")
         self.assertEqual((paths["thumbs_stage"] / "value.txt").read_text(encoding="utf-8"), "new")
         self.assertFalse(marker.exists())
+
+    def test_marker_path_must_be_canonical_absolute_without_parent_segments(self) -> None:
+        record, paths = self._planned()
+        noncanonical = self.root / "nested" / ".." / self.marker.name
+
+        with patch.object(
+            transition,
+            "identity_of",
+            side_effect=AssertionError("noncanonical marker must fail before target hashing"),
+        ):
+            with self.assertRaisesRegex(transition.TransitionCorruptionError, "canonical absolute"):
+                transition.plan_transition(
+                    kind="runtime",
+                    scope_id="synthetic",
+                    publication_id="new",
+                    marker_path=noncanonical,
+                    targets=tuple(
+                        (
+                            name,
+                            paths[f"{name}_live"],
+                            paths[f"{name}_stage"],
+                            paths[f"{name}_backup"],
+                        )
+                        for name in transition.RUNTIME_TARGETS
+                    ),
+                )
+
+        with self.assertRaisesRegex(transition.TransitionCorruptionError, "canonical absolute"):
+            transition.run_transition(noncanonical, record)
+
+        self.assertFalse(self.marker.exists())
+        self.assertTrue(paths["db_live"].exists())
+        self.assertTrue(paths["db_stage"].exists())
+        self.assertFalse(paths["db_backup"].exists())
+
 
     def test_run_rejects_stale_live_or_staged_identity_before_mutation(self) -> None:
         for changed_slot in ("live", "stage"):
