@@ -1,0 +1,9 @@
+include CLAIMS.json
+include KNOWN_LIMITATIONS.md
+include Makefile
+include NOTICE.md
+include SECURITY.md
+include SOURCE_MAP.md
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests *.py

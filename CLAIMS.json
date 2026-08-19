@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "scope": "Nexora Audit Edition 0.1.0",
+  "claims": [
+    {
+      "id": "manifest-bound-integrity",
+      "statement": "The verifier returns the exact regular-file bytes whose declared identity, producer version, byte length, and SHA-256 digest it checked, and fails closed on the tested malformed, mismatch, traversal, and symlink cases.",
+      "evidence": [
+        "tests/test_manifest.py::ManifestIntegrityTests.test_returns_the_exact_bytes_that_were_hashed",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_digest_size_identity_and_version_mismatches",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_path_traversal_before_reading",
+        "tests/test_manifest.py::ManifestIntegrityTests.test_rejects_symlink_payload"
+      ],
+      "limitations": "This is a local-filesystem verifier, not a signature system or a defense against a privileged process mutating the filesystem."
+    },
+    {
+      "id": "atomic-publication",
+      "statement": "A publication is written and validated in a private staging directory before one final directory rename makes it discoverable; tested collisions preserve the incumbent and concurrent same-ID publishers have one winner.",
+      "evidence": [
+        "tests/test_publication.py::AtomicPublicationTests.test_validates_before_the_final_name_becomes_discoverable",
+        "tests/test_publication.py::AtomicPublicationTests.test_collision_never_replaces_the_incumbent",
+        "tests/test_publication.py::AtomicPublicationTests.test_concurrent_same_id_publish_has_exactly_one_winner",
+        "tests/test_publication.py::AtomicPublicationTests.test_fsyncs_both_rename_parents_after_publication"
+      ],
+      "limitations": "The claim assumes a local POSIX filesystem and same-filesystem rename semantics; a durability error can be reported after the final name has become visible."
+    },
+    {
+      "id": "journaled-transition",
+      "statement": "A bounded three-target transition validates fresh entry state, records durable phases, serializes every scope under one owned root with a process lock, and recovers conservatively across every injected rename interruption in the test matrix.",
+      "evidence": [
+        "tests/test_transition.py::RuntimeTransitionTests.test_every_interrupted_rename_recovers_the_old_generation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_interrupted_recovery_is_idempotently_resumable",
+        "tests/test_transition.py::RuntimeTransitionTests.test_postcommit_interruption_keeps_the_verified_new_generation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_transition_lock_excludes_another_process",
+        "tests/test_transition.py::RuntimeTransitionTests.test_root_lock_excludes_a_different_scope_in_another_process",
+        "tests/test_transition.py::RuntimeTransitionTests.test_run_rejects_a_forged_record_outside_the_marker_root",
+        "tests/test_transition.py::RuntimeTransitionTests.test_run_rejects_stale_live_or_staged_identity_before_mutation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_db_postcheck_rejects_different_valid_bytes_with_the_same_publication_id",
+        "tests/test_transition.py::RuntimeTransitionTests.test_orphan_sweep_treats_live_names_as_literals",
+        "tests/test_transition.py::RuntimeTransitionTests.test_symlinked_target_ancestor_is_rejected",
+        "tests/test_transition.py::RuntimeTransitionTests.test_corrupt_prepared_marker_cannot_delete_an_incumbent"
+      ],
+      "limitations": "The matrix models injected exceptions around filesystem operations. One marker parent is an exclusive ownership root; distinct roots must not overlap or nest. This is not proof against arbitrary kernel, storage-device, administrator, or distributed-filesystem failure."
+    },
+    {
+      "id": "durable-sqlite-state",
+      "statement": "The sample rebuild preserves the selected token and report fields, validates complete typed rows before insertion, rolls back all restored sections on malformed state, and closes SQLite handles on success or failure.",
+      "evidence": [
+        "tests/test_sqlite_state.py::DurableSqliteTests.test_rebuild_preserves_credentials_reports_ownership_and_quota_history",
+        "tests/test_sqlite_state.py::DurableSqliteTests.test_malformed_durable_row_rolls_back_all_sections",
+        "tests/test_sqlite_state.py::DurableSqliteTests.test_strict_restore_rejects_duplicate_durable_rows",
+        "tests/test_sqlite_state.py::DurableSqliteTests.test_session_rolls_back_on_exception"
+      ],
+      "limitations": "The schema is deliberately minimal and synthetic; it is not a general migration framework."
+    },
+    {
+      "id": "qualified-composition",
+      "statement": "The sample weighted composite refuses a score when any positively weighted dimension lacks material evidence, checks aligned evidence structures, and remains finite for huge finite weights.",
+      "evidence": [
+        "tests/test_ranking.py::QualifiedRankingTests.test_positive_weighted_missing_evidence_suppresses_the_composite",
+        "tests/test_ranking.py::QualifiedRankingTests.test_safety_requires_complete_cumulative_and_key_aligned_evidence",
+        "tests/test_ranking.py::QualifiedRankingTests.test_huge_finite_weights_cannot_overflow_the_composite",
+        "tests/test_ranking.py::QualifiedRankingTests.test_zero_total_weight_has_an_explicit_neutral_result"
+      ],
+      "limitations": "The thresholds and neutral value are an illustrative policy, not a validated decision rule for a real domain."
+    }
+  ]
+}
