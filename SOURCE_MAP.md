@@ -49,3 +49,43 @@ not safe to leave implicit. Before publication, the edition added:
 
 These changes mean the edition is not a byte-for-byte mirror of the private
 baseline. That distinction is intentional and inspectable.
+
+## Public hardening after the initial release
+
+Version 0.1.1 is a corrective evolution of the public extraction, not a claim
+that these changes were present in the private baseline identified above. A
+second adversarial pass reproduced additional boundary defects and converted
+them into failing regressions before repair. The public edition then added:
+
+- fixed manifest and configurable payload read ceilings, including a read-loop
+  guard against growth after the initial size observation and typed I/O errors;
+- direct final publication without a publisher-created empty final-name
+  tombstone, while treating every pre-existing final path as an incumbent;
+- collision classification limited to observed final-name occupancy, with
+  unrelated rename failures left unchanged;
+- whole-tree sealing across publication validation for paths, entry types,
+  permission modes, hardlink status, and regular-file bytes, followed by
+  post-validator file and directory synchronization and a second snapshot check;
+- full-ancestry synchronization when publication or transition roots are
+  created, including reconciliation on retry after a partial sync failure;
+- canonical marker paths, a reserved transition control namespace, and
+  pairwise ancestry-disjoint target slots;
+- regular-file-only target identities and rejection of special entries;
+- recursive synchronization of closed incumbent and staged contents before the
+  first marker, followed by exact identity revalidation;
+- parent-directory synchronization between each target rename and its completed
+  phase;
+- an object-shape guard for build metadata plus dedicated required-entry,
+  publication-ID, rename-interruption, and postcommit-cleanup coverage;
+- a 30-point marker-publication interruption matrix and additional regressions
+  for controls that were already present in 0.1.0;
+- strict standards-valid saved-report JSON, preserving extreme standard numbers
+  while rejecting Python's non-standard constants;
+- exact isolated-build pins for the setuptools backend and wheel format;
+- one release identity shared by package metadata, module version, and
+  machine-readable claims.
+
+The detailed reproduction and disposition record is
+[docs/adversarial-review-0.1.1.md](docs/adversarial-review-0.1.1.md). Any
+reverse-port into private Nexora is a separate change with its own review and
+history; this source map does not imply that it has occurred.

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from nexora_audit import manifest as manifest_module
 from nexora_audit.manifest import ManifestIntegrityError, verify_and_read
 
 
@@ -147,3 +151,97 @@ class ManifestIntegrityTests(unittest.TestCase):
             verify_and_read(bundle, expected_artifact_id="other", supported_producer_versions={"v1"})
         with self.assertRaisesRegex(ManifestIntegrityError, "producer_version"):
             verify_and_read(bundle, expected_artifact_id="artifact-1", supported_producer_versions={"v2"})
+
+    def test_rejects_declared_or_observed_payload_above_the_memory_bound(self) -> None:
+        bundle, _ = self._bundle(payload=b"0123456789abcdef")
+        with self.assertRaisesRegex(ManifestIntegrityError, "maximum|limit"):
+            verify_and_read(
+                bundle,
+                expected_artifact_id="artifact-1",
+                supported_producer_versions={"v1"},
+                max_payload_bytes=8,
+            )
+
+        for child in bundle.iterdir():
+            child.unlink()
+        bundle.rmdir()
+        bundle, manifest = self._bundle(payload=b"0123456789abcdef")
+        manifest["payload"]["size_bytes"] = 4  # type: ignore[index]
+        (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(ManifestIntegrityError, "maximum|limit"):
+            verify_and_read(
+                bundle,
+                expected_artifact_id="artifact-1",
+                supported_producer_versions={"v1"},
+                max_payload_bytes=8,
+            )
+
+    def test_accepts_exact_payload_bound_and_rejects_growth_after_stat(self) -> None:
+        bundle, _ = self._bundle(payload=b"12345678")
+        verified = verify_and_read(
+            bundle,
+            expected_artifact_id="artifact-1",
+            supported_producer_versions={"v1"},
+            max_payload_bytes=8,
+        )
+        self.assertEqual(verified.content, b"12345678")
+
+        for child in bundle.iterdir():
+            child.unlink()
+        bundle.rmdir()
+        bundle, manifest = self._bundle(payload=b"0123456789abcdef")
+        manifest["payload"]["size_bytes"] = 8  # type: ignore[index]
+        (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        real_fstat = manifest_module.os.fstat
+
+        def underreport_payload(descriptor: int) -> object:
+            metadata = real_fstat(descriptor)
+            if metadata.st_size == 16:
+                return SimpleNamespace(st_mode=metadata.st_mode, st_size=8)
+            return metadata
+
+        with patch.object(manifest_module.os, "fstat", side_effect=underreport_payload):
+            with self.assertRaisesRegex(ManifestIntegrityError, "grew beyond"):
+                verify_and_read(
+                    bundle,
+                    expected_artifact_id="artifact-1",
+                    supported_producer_versions={"v1"},
+                    max_payload_bytes=8,
+                )
+
+    def test_rejects_manifest_above_its_fixed_memory_bound(self) -> None:
+        bundle, _ = self._bundle()
+        (bundle / "manifest.json").write_bytes(
+            b" " * (manifest_module._MAX_MANIFEST_BYTES + 1)
+        )
+
+        with self.assertRaisesRegex(ManifestIntegrityError, "manifest.*maximum"):
+            verify_and_read(
+                bundle,
+                expected_artifact_id="artifact-1",
+                supported_producer_versions={"v1"},
+            )
+
+    def test_read_failures_are_typed_as_manifest_integrity_errors(self) -> None:
+        bundle, _ = self._bundle()
+        failure = OSError(errno.EIO, "synthetic read failure")
+
+        with patch.object(manifest_module.os, "read", side_effect=failure):
+            with self.assertRaisesRegex(ManifestIntegrityError, "could not be read"):
+                verify_and_read(
+                    bundle,
+                    expected_artifact_id="artifact-1",
+                    supported_producer_versions={"v1"},
+                )
+
+    def test_rejects_invalid_payload_memory_bounds(self) -> None:
+        bundle, _ = self._bundle()
+        for value in (True, 0, -1):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "max_payload_bytes"):
+                    verify_and_read(
+                        bundle,
+                        expected_artifact_id="artifact-1",
+                        supported_producer_versions={"v1"},
+                        max_payload_bytes=value,  # type: ignore[arg-type]
+                    )

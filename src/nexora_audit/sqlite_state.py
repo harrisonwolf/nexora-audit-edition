@@ -6,6 +6,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -144,6 +145,10 @@ def _require_timestamp(value: object, field: str, *, optional: bool = False) -> 
         raise ValueError(f"{field} timestamp must include a UTC offset")
 
 
+def _reject_nonstandard_json_constant(token: str) -> None:
+    raise ValueError(f"non-standard JSON constant {token!r}")
+
+
 def _validate_durable_row(identity: str, row: Mapping[str, object]) -> None:
     if identity == "agent_tokens":
         _require_text(row["token_hash"], "token_hash")
@@ -164,9 +169,13 @@ def _validate_durable_row(identity: str, row: Mapping[str, object]) -> None:
         _require_text(row["payload_json"], "payload_json")
         assert isinstance(row["payload_json"], str)
         try:
-            payload = json.loads(row["payload_json"])
-        except json.JSONDecodeError as error:
-            raise ValueError("payload_json must contain valid JSON") from error
+            payload = json.loads(
+                row["payload_json"],
+                parse_constant=_reject_nonstandard_json_constant,
+                parse_float=Decimal,
+            )
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ValueError("payload_json must contain standards-valid JSON") from error
         if not isinstance(payload, dict):
             raise ValueError("payload_json must contain a JSON object")
         _require_text(row["access_token_hash"], "access_token_hash")

@@ -164,3 +164,70 @@ class DurableSqliteTests(unittest.TestCase):
                 created_at="2026-08-18T00:00:00+00:00",
                 payload_json="[]",
             )
+
+    def test_insert_rejects_nonstandard_nonfinite_json_constants(self) -> None:
+        db = self.root / "runtime.db"
+        create_runtime_database(db, publication_id="one")
+        for payload in (
+            '{"value": NaN}',
+            '{"value": Infinity}',
+            '{"value": -Infinity}',
+            '{"nested": [1, {"value": NaN}]}',
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "JSON"):
+                    insert_saved_report(
+                        db,
+                        report_id="report",
+                        agent_id="agent",
+                        created_at="2026-08-18T00:00:00+00:00",
+                        payload_json=payload,
+                    )
+        insert_saved_report(
+            db,
+            report_id="string-is-valid",
+            agent_id="agent",
+            created_at="2026-08-18T00:00:00+00:00",
+            payload_json='{"value": "NaN"}',
+        )
+        insert_saved_report(
+            db,
+            report_id="extreme-standard-number",
+            agent_id="agent",
+            created_at="2026-08-18T00:00:00+00:00",
+            payload_json='{"value": 1e9999}',
+        )
+
+    def test_restore_rejects_nonstandard_json_and_rolls_back_every_section(self) -> None:
+        db = self.root / "runtime.db"
+        create_runtime_database(db, publication_id="one")
+        state = {
+            "agent_tokens": [
+                {
+                    "token_hash": "hash-1",
+                    "agent_id": "agent-1",
+                    "label": None,
+                    "active": 1,
+                    "created_at": "2026-08-18T00:00:00+00:00",
+                    "quota_override": None,
+                    "expires_at": None,
+                }
+            ],
+            "saved_reports": [
+                {
+                    "report_id": "report-1",
+                    "payload_json": '{"value": NaN}',
+                    "access_token_hash": "hash-2",
+                    "created_at": "2026-08-18T00:00:00+00:00",
+                    "agent_id": "agent-1",
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(ValueError, "JSON"):
+            restore_durable_state(db, state)
+
+        with sqlite_session(db) as connection:
+            token_count = connection.execute("SELECT COUNT(*) FROM ref_agent_token").fetchone()[0]
+            report_count = connection.execute("SELECT COUNT(*) FROM runtime_saved_report").fetchone()[0]
+        self.assertEqual((token_count, report_count), (0, 0))
