@@ -24,6 +24,10 @@ Version 0.1.2 extends the public evidence and review surface without changing
 the runtime mechanisms; its bounded delta is recorded in the
 [0.1.2 evidence release record](docs/release-0.1.2.md).
 
+Version 0.1.3 is a forward documentation correction. Its exact scope is
+recorded in the
+[0.1.3 correction record](docs/release-0.1.3.md).
+
 ## What is included
 
 | Mechanism | Question it addresses | Executable evidence |
