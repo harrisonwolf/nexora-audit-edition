@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Nexora Audit Edition 0.1.2",
+  "scope": "Nexora Audit Edition 0.1.3",
   "claims": [
     {
       "id": "manifest-bound-integrity",

@@ -16,6 +16,7 @@ REQUIRED = {
     "CLAIMS.json",
     "docs/adversarial-review-0.1.1.md",
     "docs/release-0.1.2.md",
+    "docs/release-0.1.3.md",
     "KNOWN_LIMITATIONS.md",
     "MANIFEST.in",
     "LICENSE",
