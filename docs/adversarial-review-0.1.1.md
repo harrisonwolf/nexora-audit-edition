@@ -12,6 +12,18 @@ mismatch between the 0.1.0 code and its published contract.
 
 This is a correction record, not a certification.
 
+## Public release snapshots
+
+The exact initial 0.1.0 state is public at
+[`99935c2`](https://github.com/harrisonwolf/nexora-audit-edition/commit/99935c2).
+The corrective release is tagged
+[`v0.1.1`](https://github.com/harrisonwolf/nexora-audit-edition/releases/tag/v0.1.1),
+and the complete release-level delta is the
+[0.1.0-to-v0.1.1 comparison](https://github.com/harrisonwolf/nexora-audit-edition/compare/99935c2...v0.1.1).
+The public history preserves these release snapshots, not every intermediate
+fail-before and repair commit; this method record does not substitute for those
+omitted intermediate states.
+
 ## Method
 
 For each accepted new finding:
