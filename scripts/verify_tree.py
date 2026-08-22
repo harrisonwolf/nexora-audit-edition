@@ -15,6 +15,7 @@ REQUIRED = {
     ".github/ISSUE_TEMPLATE/claim-falsification.yml",
     "CLAIMS.json",
     "docs/adversarial-review-0.1.1.md",
+    "docs/release-0.1.2.md",
     "KNOWN_LIMITATIONS.md",
     "MANIFEST.in",
     "LICENSE",

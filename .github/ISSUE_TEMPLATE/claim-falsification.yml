@@ -28,7 +28,7 @@ body:
     attributes:
       label: Tested commit
       description: Provide the full commit SHA or release tag.
-      placeholder: v0.1.1
+      placeholder: v0.1.2 or a full commit SHA
     validations:
       required: true
   - type: textarea

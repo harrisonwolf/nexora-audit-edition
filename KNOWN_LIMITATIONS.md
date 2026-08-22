@@ -52,13 +52,15 @@ These boundaries are part of the release, not footnotes to it.
 - Incomplete staging directories and transition residue are retained for
   explicit inspection or maintenance. They are not silently treated as valid
   releases or reclaimed final identities.
-- The interruption matrices inject exceptions around every modeled rename,
-  every marker-publication point, selected synchronization failures, and
-  postcommit cleanup. Separate tests kill real child processes immediately
-  before and after publication visibility and at representative precommit and
-  postcommit transition phases. These selected SIGKILL cases do not emulate
-  every kernel panic, torn write, disk-cache behavior, power loss, device
-  failure, or administrator action.
+- The deterministic exception-injection matrices precisely exercise dirty
+  windows around every modeled rename and marker-publication point, selected
+  synchronization failures, and postcommit cleanup. Separate tests exercise
+  actual process disappearance—and, for transitions, kernel release of the
+  process-held lock—at selected stable boundaries immediately before and after
+  publication visibility and at representative precommit and postcommit
+  transition phases. These bodies of evidence are complementary. The selected
+  SIGKILL cases do not emulate every kernel panic, torn write, disk-cache
+  behavior, power loss, device failure, or administrator action.
 
 ## Resource model
 
