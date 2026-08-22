@@ -1,0 +1,88 @@
+name: Claim falsification
+description: Submit a safe, reproducible challenge to a bounded public claim.
+title: "[claim challenge] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for synthetic, public reproductions. Use private security
+        reporting instead if the report is sensitive. A report is a hypothesis
+        until the claimed violation is reproduced within the claim's stated
+        limitations.
+  - type: dropdown
+    id: claim
+    attributes:
+      label: Claim ID
+      description: Select the public claim being challenged.
+      options:
+        - manifest-bound-integrity
+        - atomic-publication
+        - journaled-transition
+        - durable-sqlite-state
+        - qualified-composition
+        - Not sure or another documented boundary
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Tested commit
+      description: Provide the full commit SHA or release tag.
+      placeholder: v0.1.1
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include OS, filesystem, Python version, and other relevant conditions.
+      placeholder: Ubuntu 24.04, ext4, Python 3.12
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest synthetic steps or test that demonstrates the behavior.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Quote or identify the claim statement and explain the expected result.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: State exactly what occurred, including the exception or standing filesystem state.
+    validations:
+      required: true
+  - type: textarea
+    id: limitations
+    attributes:
+      label: Claim-boundary analysis
+      description: Explain why the reproduction falls inside the claim's stated limitations.
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Add logs, a minimal repository link, or other non-sensitive evidence.
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I tested the stated commit or release.
+          required: true
+        - label: This report uses synthetic data and contains no credentials, personal data, proprietary data, or exploit against another system.
+          required: true
+        - label: I have read the claim's stated limitations and believe this reproduction falls inside them.
+          required: true

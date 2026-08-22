@@ -54,8 +54,11 @@ These boundaries are part of the release, not footnotes to it.
   releases or reclaimed final identities.
 - The interruption matrices inject exceptions around every modeled rename,
   every marker-publication point, selected synchronization failures, and
-  postcommit cleanup. They do not emulate every kernel panic, torn write,
-  disk-cache behavior, power loss, device failure, or administrator action.
+  postcommit cleanup. Separate tests kill real child processes immediately
+  before and after publication visibility and at representative precommit and
+  postcommit transition phases. These selected SIGKILL cases do not emulate
+  every kernel panic, torn write, disk-cache behavior, power loss, device
+  failure, or administrator action.
 
 ## Resource model
 

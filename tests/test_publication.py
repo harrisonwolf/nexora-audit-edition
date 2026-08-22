@@ -4,6 +4,8 @@ import concurrent.futures
 import errno
 import hashlib
 import json
+import multiprocessing
+import signal
 import sys
 import tempfile
 import unittest
@@ -47,6 +49,58 @@ def _validator(expected: int):
             supported_producer_versions={"v1"},
         )
     return validate
+
+
+def _publish_in_process(
+    root_text: str,
+    publication_id: str,
+    value: int,
+    barrier,
+    results,
+) -> None:
+    def validate(staged: Path) -> None:
+        _validator(value)(staged)
+        barrier.wait()
+
+    try:
+        publish_atomically(
+            Path(root_text),
+            publication_id,
+            _files(value),
+            validator=validate,
+        )
+        results.put(("published", value, ""))
+    except PublicationCollisionError:
+        results.put(("collision", value, ""))
+    except Exception as exc:
+        results.put(("error", value, f"{type(exc).__name__}: {exc}"))
+
+
+def _publish_at_rename_checkpoint(
+    root_text: str,
+    timing: str,
+    reached,
+) -> None:
+    from nexora_audit import publication
+
+    real_rename = publication.os.rename
+
+    def checkpoint_rename(source: Path, target: Path) -> None:
+        if timing == "before":
+            reached.set()
+            signal.pause()
+        real_rename(source, target)
+        if timing == "after":
+            reached.set()
+            signal.pause()
+
+    with patch.object(publication.os, "rename", side_effect=checkpoint_rename):
+        publish_atomically(
+            Path(root_text),
+            "release-1",
+            _files(1),
+            validator=_validator(1),
+        )
 
 
 class AtomicPublicationTests(unittest.TestCase):
@@ -172,6 +226,92 @@ class AtomicPublicationTests(unittest.TestCase):
             outcomes = sorted(pool.map(attempt, (1, 2)))
         self.assertEqual(outcomes, ["collision", "published"])
         self.assertEqual(len(discover_publications(self.root)), 1)
+
+    def test_multiprocess_same_id_publish_has_exactly_one_winner(self) -> None:
+        context = multiprocessing.get_context("fork")
+        results = context.Queue()
+        values = tuple(range(1, 5))
+        barrier = context.Barrier(len(values), timeout=20)
+        processes = [
+            context.Process(
+                target=_publish_in_process,
+                args=(
+                    str(self.root),
+                    "release-1",
+                    value,
+                    barrier,
+                    results,
+                ),
+            )
+            for value in values
+        ]
+        started = []
+
+        try:
+            for process in processes:
+                process.start()
+                started.append(process)
+            outcomes = [results.get(timeout=30) for _value in values]
+            for process in started:
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+        finally:
+            for process in started:
+                if process.is_alive():
+                    process.terminate()
+                process.join(5)
+            results.close()
+            results.join_thread()
+
+        errors = [detail for status, _value, detail in outcomes if status == "error"]
+        winners = [value for status, value, _detail in outcomes if status == "published"]
+        collisions = [value for status, value, _detail in outcomes if status == "collision"]
+        self.assertEqual(errors, [])
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(collisions), len(values) - 1)
+        self.assertEqual(discover_publications(self.root), (self.root / "release-1",))
+        payload = json.loads((self.root / "release-1" / "payload.json").read_text())
+        self.assertEqual(payload, {"value": winners[0]})
+
+    def test_process_death_at_visibility_boundary_is_all_or_nothing(self) -> None:
+        context = multiprocessing.get_context("fork")
+
+        for timing in ("before", "after"):
+            with self.subTest(timing=timing):
+                root = self.root / timing
+                reached = context.Event()
+                process = context.Process(
+                    target=_publish_at_rename_checkpoint,
+                    args=(str(root), timing, reached),
+                )
+
+                try:
+                    process.start()
+                    self.assertTrue(reached.wait(20), "child did not reach rename checkpoint")
+                    process.kill()
+                    process.join(10)
+                    self.assertEqual(process.exitcode, -signal.SIGKILL)
+                finally:
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(5)
+
+                final = root / "release-1"
+                if timing == "before":
+                    self.assertFalse(final.exists())
+                    self.assertEqual(discover_publications(root), ())
+                    publish_atomically(root, "release-1", _files(1), validator=_validator(1))
+                else:
+                    self.assertEqual(discover_publications(root), (final,))
+                    with self.assertRaises(PublicationCollisionError):
+                        publish_atomically(root, "release-1", _files(2), validator=_validator(2))
+
+                payload = verify_and_read(
+                    final,
+                    expected_artifact_id="artifact-1",
+                    supported_producer_versions={"v1"},
+                )
+                self.assertEqual(payload.content, b'{"value": 1}\n')
 
     def test_rejects_payload_paths_that_escape_staging(self) -> None:
         files = _files(1)

@@ -85,6 +85,10 @@ to reproduce, not a certification. Require exact paths, a concrete failure
 trace, and a test that fails before a proposed fix. False positives and
 documented limitations should be labeled as such.
 
+Reproducible challenges to a public claim are welcome through the
+[claim-falsification issue form](https://github.com/harrisonwolf/nexora-audit-edition/issues/new?template=claim-falsification.yml).
+Use private security reporting instead when a reproduction is sensitive.
+
 ## Authorship
 
 Harrison Wolf directed the extraction, claim scoping, adversarial review, and

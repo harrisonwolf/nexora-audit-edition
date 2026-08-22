@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REQUIRED = {
     ".gitattributes",
     ".gitignore",
+    ".github/ISSUE_TEMPLATE/claim-falsification.yml",
     "CLAIMS.json",
     "docs/adversarial-review-0.1.1.md",
     "KNOWN_LIMITATIONS.md",
@@ -26,6 +27,7 @@ REQUIRED = {
 }
 ROOT_FILES = REQUIRED | {"LICENSE"}
 ALLOWED_PREFIXES = (
+    ".github/ISSUE_TEMPLATE/",
     ".github/workflows/",
     "docs/",
     "scripts/",
