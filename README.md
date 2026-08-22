@@ -15,6 +15,11 @@ The exact initial 0.1.0 snapshot is public at
 and its complete release-level correction is visible in the
 [0.1.0-to-v0.1.1 comparison](https://github.com/harrisonwolf/nexora-audit-edition/compare/99935c2...v0.1.1).
 
+Public history preserves release snapshots and their aggregate deltas; it does
+not preserve separate fail-before and repair commits for the 0.1.1 correction.
+Test-before-fix ordering there is documented method rather than independently
+observable commit order.
+
 Version 0.1.2 extends the public evidence and review surface without changing
 the runtime mechanisms; its bounded delta is recorded in the
 [0.1.2 evidence release record](docs/release-0.1.2.md).

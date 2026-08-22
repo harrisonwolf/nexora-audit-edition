@@ -89,3 +89,7 @@ The detailed reproduction and disposition record is
 [docs/adversarial-review-0.1.1.md](docs/adversarial-review-0.1.1.md). Any
 reverse-port into private Nexora is a separate change with its own review and
 history; this source map does not imply that it has occurred.
+
+The public package is not a dependency of private Nexora. Reverse-ports are
+separately reviewed changes; no automatic or publicly verifiable conformance
+between the two trees is claimed.
