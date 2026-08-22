@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "scope": "Nexora Audit Edition 0.1.1",
+  "scope": "Nexora Audit Edition 0.1.2",
   "claims": [
     {
       "id": "manifest-bound-integrity",
@@ -19,7 +19,7 @@
     },
     {
       "id": "atomic-publication",
-      "statement": "Under supported local-filesystem semantics, publication root links, staged regular-file bytes, and directory entries are synchronized; the staged path set, entry types, permission modes, hardlink status, and bytes are sealed across validation and re-synchronized before one final rename makes the tree discoverable. Every final path present at the absent-name preflight is preserved, and tested cooperative same-ID publishers have one winner.",
+      "statement": "Under supported local-filesystem semantics, publication root links, staged regular-file bytes, and directory entries are synchronized; the staged path set, entry types, permission modes, hardlink status, and bytes are sealed across validation and re-synchronized before one final rename makes the tree discoverable. Every final path present at the absent-name preflight is preserved and tested cooperative same-ID publishers have one winner. At selected final-rename boundaries, real process death before the rename leaves the final identity unoccupied and retryable; death after the rename leaves the sealed, manifest-verifiable tree occupying that identity and a later publisher receives a collision.",
       "evidence": [
         "tests/test_publication.py::AtomicPublicationTests.test_validates_before_the_final_name_becomes_discoverable",
         "tests/test_publication.py::AtomicPublicationTests.test_validator_snapshot_binds_paths_types_modes_and_hardlinks",
@@ -29,22 +29,25 @@
         "tests/test_publication.py::AtomicPublicationTests.test_root_creation_retry_resynchronizes_prior_ancestor_links",
         "tests/test_publication.py::AtomicPublicationTests.test_collision_never_replaces_the_incumbent",
         "tests/test_publication.py::AtomicPublicationTests.test_concurrent_same_id_publish_has_exactly_one_winner",
+        "tests/test_publication.py::AtomicPublicationTests.test_multiprocess_same_id_publish_has_exactly_one_winner",
+        "tests/test_publication.py::AtomicPublicationTests.test_process_death_at_visibility_boundary_is_all_or_nothing",
         "tests/test_publication.py::AtomicPublicationTests.test_fsyncs_both_rename_parents_after_publication",
         "tests/test_publication.py::AtomicPublicationTests.test_interruption_before_visibility_does_not_leave_a_final_name_tombstone",
         "tests/test_publication.py::AtomicPublicationTests.test_existing_empty_final_directory_is_never_replaced",
         "tests/test_publication.py::AtomicPublicationTests.test_existing_symlink_is_never_replaced",
         "tests/test_publication.py::AtomicPublicationTests.test_visibility_followed_by_sync_failure_reports_an_indeterminate_outcome"
       ],
-      "limitations": "The claim assumes a cooperative process, a case-sensitive local POSIX filesystem, and same-filesystem rename semantics. On filesystems that reject directory fsync, power-loss durability is not claimed. The seal excludes timestamps, ownership, ACLs, and extended attributes, and it cannot constrain a retained or concurrent writer. A same-user actor can race path checks, and a durability error can be reported after the final name becomes visible."
+      "limitations": "The claim assumes a cooperative process, a case-sensitive local POSIX filesystem, and same-filesystem rename semantics. The selected process-death tests establish final-name visibility, retry, and collision behavior; they are not power-loss, kernel-crash, or storage-failure tests. On filesystems that reject directory fsync, power-loss durability is not claimed. The seal excludes timestamps, ownership, ACLs, and extended attributes, and it cannot constrain a retained or concurrent writer. A same-user actor can race path checks, and a durability error can be reported after the final name becomes visible."
     },
     {
       "id": "journaled-transition",
-      "statement": "A bounded runtime or build transition re-synchronizes the complete ownership-root ancestry, validates topology and fresh entry state, synchronizes closed incumbent and staged contents before recording intent, revalidates their identities, records ordered phases with parent synchronization, and recovers conservatively across the tested interruption matrices.",
+      "statement": "A bounded runtime or build transition re-synchronizes the complete ownership-root ancestry, validates topology and fresh entry state, synchronizes closed incumbent and staged contents before recording intent, revalidates their identities, records ordered phases with parent synchronization, and recovers conservatively across the tested interruption matrices and selected real process deaths at precommit and postcommit phases.",
       "evidence": [
         "tests/test_transition.py::RuntimeTransitionTests.test_every_interrupted_rename_recovers_the_old_generation",
         "tests/test_transition.py::RuntimeTransitionTests.test_every_marker_publication_interruption_reaches_a_coherent_terminal_state",
         "tests/test_transition.py::RuntimeTransitionTests.test_interrupted_recovery_is_idempotently_resumable",
         "tests/test_transition.py::RuntimeTransitionTests.test_postcommit_interruption_keeps_the_verified_new_generation",
+        "tests/test_transition.py::RuntimeTransitionTests.test_process_death_at_precommit_and_postcommit_phases_recovers_coherently",
         "tests/test_transition.py::RuntimeTransitionTests.test_every_interrupted_build_rename_recovers_the_old_generation",
         "tests/test_transition.py::RuntimeTransitionTests.test_build_postchecks_fail_closed_for_missing_malformed_or_mismatched_metadata",
         "tests/test_transition.py::RuntimeTransitionTests.test_transition_lock_excludes_another_process",
@@ -64,7 +67,7 @@
         "tests/test_transition.py::RuntimeTransitionTests.test_symlinked_target_ancestor_is_rejected",
         "tests/test_transition.py::RuntimeTransitionTests.test_corrupt_prepared_marker_cannot_delete_an_incumbent"
       ],
-      "limitations": "Inputs must be closed and self-contained before entry; SQLite WAL/SHM sidecars are outside the transition. Directory fsync may be unavailable on documented filesystems. One marker parent is an exclusive ownership root, and distinct roots must not overlap or nest. The matrices do not prove behavior under arbitrary kernel, device, administrator, or distributed-filesystem failure."
+      "limitations": "Inputs must be closed and self-contained before entry; SQLite WAL/SHM sidecars are outside the transition. Directory fsync may be unavailable on documented filesystems. One marker parent is an exclusive ownership root, and distinct roots must not overlap or nest. Real process-death evidence covers one representative precommit durable phase and the commit phase; dirty rename-to-phase windows are covered by deterministic exception injection rather than real process death. Neither body of evidence proves behavior under arbitrary kernel, device, administrator, or distributed-filesystem failure."
     },
     {
       "id": "durable-sqlite-state",

@@ -10,6 +10,14 @@ proof that finite tests establish correctness. The public claim boundary is
 machine-readable in [CLAIMS.json](CLAIMS.json). The 0.1.1 corrective release and
 its reproduced findings are recorded in
 [the adversarial review](docs/adversarial-review-0.1.1.md).
+The exact initial 0.1.0 snapshot is public at
+[`99935c2`](https://github.com/harrisonwolf/nexora-audit-edition/commit/99935c2),
+and its complete release-level correction is visible in the
+[0.1.0-to-v0.1.1 comparison](https://github.com/harrisonwolf/nexora-audit-edition/compare/99935c2...v0.1.1).
+
+Version 0.1.2 extends the public evidence and review surface without changing
+the runtime mechanisms; its bounded delta is recorded in the
+[0.1.2 evidence release record](docs/release-0.1.2.md).
 
 ## What is included
 
@@ -80,6 +88,17 @@ A coding agent can help search the state space, but its report is an argument
 to reproduce, not a certification. Require exact paths, a concrete failure
 trace, and a test that fails before a proposed fix. False positives and
 documented limitations should be labeled as such.
+
+Reproducible challenges to a public claim are welcome through the
+[claim-falsification issue form](https://github.com/harrisonwolf/nexora-audit-edition/issues/new?template=claim-falsification.yml).
+Use private security reporting instead when a reproduction is sensitive.
+
+## Authorship
+
+Harrison Wolf directed the extraction, claim scoping, adversarial review, and
+release. Coding agents produced most of the implementation under executable
+tests and release gates; their reports and patches were treated as untrusted
+proposals, not certifications.
 
 ## Scope
 

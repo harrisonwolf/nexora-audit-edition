@@ -47,7 +47,7 @@ class PublicClaimTests(unittest.TestCase):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         claims = json.loads((ROOT / "CLAIMS.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(nexora_audit.__version__, "0.1.1")
+        self.assertEqual(nexora_audit.__version__, "0.1.2")
         self.assertEqual(project["project"]["version"], nexora_audit.__version__)
         self.assertEqual(claims["scope"], f"Nexora Audit Edition {nexora_audit.__version__}")
 

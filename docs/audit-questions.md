@@ -36,6 +36,8 @@ every finding.
 11. What does the caller learn if visibility succeeds but durability reporting
     fails?
 12. Which metadata and non-cooperating path races remain outside the model?
+13. What is visible after real process death immediately before or after the
+    final rename?
 
 ## Journaled transition
 
@@ -67,6 +69,8 @@ every finding.
     object-shaped metadata, and the expected publication identity?
 15. Are orphan names matched literally, and are all deletion candidates
     validated before the first removal?
+16. Does recovery remain coherent after real process death at selected
+    precommit and postcommit phases?
 
 ## SQLite carry-over
 

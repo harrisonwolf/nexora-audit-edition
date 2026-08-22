@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import signal
 import sqlite3
 import sys
 import tempfile
@@ -20,6 +21,35 @@ def _hold_transition_lock(marker: str, ready: object, release: object) -> None:
     with transition.transition_lock(Path(marker)):
         ready.set()  # type: ignore[attr-defined]
         release.wait(10)  # type: ignore[attr-defined]
+
+
+class _StopAtPhaseReporter:
+    def __init__(self, marker: str, phase: str, reached: object) -> None:
+        self.marker = Path(marker)
+        self.phase = phase
+        self.reached = reached
+
+    def poll(self) -> None:
+        current = transition.read_marker(self.marker)
+        if current is not None and current["phase"] == self.phase:
+            self.reached.set()  # type: ignore[attr-defined]
+            signal.pause()
+
+    def step(self, _label: str, _message: str) -> None:
+        return
+
+
+def _run_transition_to_phase(
+    marker: str,
+    record: dict[str, object],
+    phase: str,
+    reached: object,
+) -> None:
+    transition.run_transition(
+        Path(marker),
+        record,
+        reporter=_StopAtPhaseReporter(marker, phase, reached),  # type: ignore[arg-type]
+    )
 
 
 class RuntimeTransitionTests(unittest.TestCase):
@@ -468,6 +498,49 @@ class RuntimeTransitionTests(unittest.TestCase):
         self.assertEqual(marker["phase"], "cleanup")  # type: ignore[index]
         self.assertEqual(transition.resolve_pending_transition(self.marker), "kept_new")
         self.assertEqual((paths["thumbs_live"] / "value.txt").read_text(encoding="utf-8"), "new")
+
+    def test_process_death_at_precommit_and_postcommit_phases_recovers_coherently(self) -> None:
+        context = multiprocessing.get_context("fork")
+
+        for phase, expected_outcome, expected_identity in (
+            ("installed_thumbs", "restored_old", "old_identity"),
+            ("new_verified", "kept_new", "new_identity"),
+        ):
+            with self.subTest(phase=phase):
+                root = self.root / f"process-death-{phase}"
+                root.mkdir()
+                record, _paths, marker = self._planned_under(root)
+                reached = context.Event()
+                process = context.Process(
+                    target=_run_transition_to_phase,
+                    args=(str(marker), record, phase, reached),
+                )
+
+                try:
+                    process.start()
+                    self.assertTrue(reached.wait(20), "child did not reach durable phase")
+                    process.kill()
+                    process.join(10)
+                    self.assertEqual(process.exitcode, -signal.SIGKILL)
+                finally:
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(5)
+
+                visible = transition.read_marker(marker)
+                self.assertIsNotNone(visible)
+                self.assertEqual(visible["phase"], phase)  # type: ignore[index]
+                self.assertEqual(transition.resolve_pending_transition(marker), expected_outcome)
+                self.assertIsNone(transition.resolve_pending_transition(marker))
+                self.assertFalse(marker.exists())
+
+                for target in record["targets"]:  # type: ignore[index]
+                    self.assertEqual(
+                        transition.identity_of(Path(target["live"])),
+                        target[expected_identity],
+                    )
+                    self.assertFalse(Path(target["stage"]).exists())
+                    self.assertFalse(Path(target["backup"]).exists())
 
     def test_recovery_refuses_an_unknown_or_tampered_state(self) -> None:
         record, paths = self._planned()
