@@ -47,9 +47,29 @@ class PublicClaimTests(unittest.TestCase):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         claims = json.loads((ROOT / "CLAIMS.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(nexora_audit.__version__, "0.1.2")
+        self.assertEqual(nexora_audit.__version__, "0.1.3")
         self.assertEqual(project["project"]["version"], nexora_audit.__version__)
         self.assertEqual(claims["scope"], f"Nexora Audit Edition {nexora_audit.__version__}")
+
+    def test_public_history_and_conformance_boundaries_are_explicit(self) -> None:
+        readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+        source_map = " ".join(
+            (ROOT / "SOURCE_MAP.md").read_text(encoding="utf-8").split()
+        )
+
+        self.assertIn(
+            "Public history preserves release snapshots and their aggregate deltas; "
+            "it does not preserve separate fail-before and repair commits for the "
+            "0.1.1 correction.",
+            readme,
+        )
+        self.assertIn(
+            "The public package is not a dependency of private Nexora. Reverse-ports "
+            "are separately reviewed changes; no automatic or publicly verifiable "
+            "conformance between the two trees is claimed.",
+            source_map,
+        )
+
 
 
 if __name__ == "__main__":
